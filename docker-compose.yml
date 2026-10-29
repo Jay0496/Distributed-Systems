@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  node1:
+    build: .
+    ports:
+      - "50051:50051"
+    environment:
+      - NODE_ID=node1
+  node2:
+    build: .
+    ports:
+      - "50052:50052"
+    environment:
+      - NODE_ID=node2
+  node3:
+    build: .
+    ports:
+      - "50053:50053"
+    environment:
+      - NODE_ID=node3
+  node4:
+    build: .
+    ports:
+      - "50054:50054"
+    environment:
+      - NODE_ID=node4
+  node5:
+    build: .
+    ports:
+      - "50055:50055"
+    environment:
+      - NODE_ID=node5
