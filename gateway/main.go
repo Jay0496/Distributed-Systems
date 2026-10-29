@@ -14,7 +14,7 @@ func main() {
 	command := os.Args[1]
 	switch command {
 	case "put":
-		fmt.Println("TODO: Implement PUT logic and consistent hash routing[cite: 3]")
+		fmt.Println("TODO: Implement PUT logic and consistent hash routing")
 	case "get":
 		fmt.Println("TODO: Implement GET logic")
 	case "mode":
