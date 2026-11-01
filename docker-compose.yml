@@ -3,31 +3,55 @@ version: '3.8'
 services:
   node1:
     build: .
+    container_name: node1
     ports:
       - "50051:50051"
     environment:
       - NODE_ID=node1
+      - PORT=50051
+    networks:
+      - cluster-net
   node2:
     build: .
+    container_name: node2
     ports:
       - "50052:50052"
     environment:
       - NODE_ID=node2
+      - PORT=50052
+    networks:
+      - cluster-net
   node3:
     build: .
+    container_name: node3
     ports:
       - "50053:50053"
     environment:
       - NODE_ID=node3
+      - PORT=50053
+    networks:
+      - cluster-net
   node4:
     build: .
+    container_name: node4
     ports:
       - "50054:50054"
     environment:
       - NODE_ID=node4
+      - PORT=50054
+    networks:
+      - cluster-net
   node5:
     build: .
+    container_name: node5
     ports:
       - "50055:50055"
     environment:
       - NODE_ID=node5
+      - PORT=50055
+    networks:
+      - cluster-net
+
+networks:
+  cluster-net:
+    driver: bridge
