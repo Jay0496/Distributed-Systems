@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"distributed-kv-store/consensus"
@@ -18,7 +19,10 @@ import (
 
 	"github.com/hashicorp/raft"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 type server struct {
@@ -26,19 +30,40 @@ type server struct {
 	store storage.KVStore
 	node  *consensus.Node
 	cfg   Config
+	redun RedundancyEngine
+
+	connMu sync.Mutex
+	conns  map[string]*grpc.ClientConn
+	dial   dialFunc
+}
+
+// newServer builds a server with its connection cache and redundancy hook.
+// A nil dial uses the production gRPC dialer.
+func newServer(cfg Config, store storage.KVStore, node *consensus.Node, dial dialFunc) *server {
+	if dial == nil {
+		dial = newDialFunc(cfg)
+	}
+	return &server{
+		store: store,
+		node:  node,
+		cfg:   cfg,
+		redun: noopRedundancy{},
+		conns: make(map[string]*grpc.ClientConn),
+		dial:  dial,
+	}
 }
 
 func (s *server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
-	// 1. Only the leader can accept writes.
-	if s.node.Raft.State() != raft.Leader {
-		leaderAddr, _ := s.node.Raft.LeaderWithID()
-		return &pb.PutResponse{
-			Success: false,
-			Message: fmt.Sprintf("Not the leader. Current leader: %s", leaderAddr),
-		}, nil
+	if err := validateMode(req.GetMode()); err != nil {
+		return &pb.PutResponse{Success: false, Message: err.Error()}, nil
 	}
 
-	// 2. Wrap the request in a Raft command.
+	// Followers transparently forward writes to the current leader.
+	if s.node.Raft.State() != raft.Leader {
+		return s.forwardPut(ctx, req)
+	}
+
+	// Wrap the request in a Raft command.
 	cmd := consensus.Command{
 		Op:    "put",
 		Mode:  req.GetMode(),
@@ -50,13 +75,13 @@ func (s *server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, 
 		return &pb.PutResponse{Success: false, Message: err.Error()}, nil
 	}
 
-	// 3. Replicate the command through Raft and wait for consensus.
+	// Replicate the command through Raft and wait for consensus.
 	future := s.node.Raft.Apply(data, 10*time.Second)
 	if err := future.Error(); err != nil {
 		return &pb.PutResponse{Success: false, Message: err.Error()}, nil
 	}
 
-	// 4. Check whether the FSM returned an error while applying.
+	// Check whether the FSM returned an error while applying.
 	if applyErr := future.Response(); applyErr != nil {
 		return &pb.PutResponse{Success: false, Message: fmt.Sprintf("%v", applyErr)}, nil
 	}
@@ -65,13 +90,13 @@ func (s *server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, 
 }
 
 func (s *server) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
-	// Reads go through the Raft log so that they observe all previously
-	// committed writes (linearizable reads). Followers will forward in the
-	// next phase.
+	// Followers transparently forward reads to the current leader.
 	if s.node.Raft.State() != raft.Leader {
-		return &pb.GetResponse{Success: false}, nil
+		return s.forwardGet(ctx, req)
 	}
 
+	// Reads go through the Raft log so they observe all previously committed
+	// writes (linearizable reads).
 	cmd := consensus.Command{Op: "get", Key: req.GetKey()}
 	data, err := json.Marshal(cmd)
 	if err != nil {
@@ -187,8 +212,22 @@ func main() {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	grpcServer := grpc.NewServer()
-	pb.RegisterStorageServiceServer(grpcServer, &server{store: store, node: node, cfg: cfg})
+	var grpcOpts []grpc.ServerOption
+	if cfg.TLSEnabled {
+		creds, err := credentials.NewServerTLSFromFile(cfg.TLSCert, cfg.TLSKey)
+		if err != nil {
+			log.Fatalf("Failed to load TLS credentials: %v", err)
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(creds))
+	}
+
+	grpcServer := grpc.NewServer(grpcOpts...)
+	pb.RegisterStorageServiceServer(grpcServer, newServer(cfg, store, node, nil))
+
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthServer.SetServingStatus("storage.StorageService", healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
 
 	// Optionally join an existing cluster through a live leader.
 	joinCluster(cfg, string(transport.LocalAddr()))
