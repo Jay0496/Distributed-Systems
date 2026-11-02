@@ -56,7 +56,7 @@ func TestRaftClusterMockStore(t *testing.T) {
 		}
 
 		var err error
-		nodes[i], err = StartRaft(fmt.Sprintf("node%d", i+1), stores[i], transports[i], cfg)
+		nodes[i], err = StartRaft(fmt.Sprintf("node%d", i+1), stores[i], transports[i], t.TempDir(), cfg)
 		if err != nil {
 			t.Fatalf("Failed to start node %d: %v", i+1, err)
 		}

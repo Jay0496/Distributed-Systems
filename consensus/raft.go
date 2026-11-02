@@ -2,10 +2,13 @@ package consensus
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"distributed-kv-store/storage"
 
 	"github.com/hashicorp/raft"
+	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 )
 
 // Node bundles the Raft instance with its FSM so callers can access both.
@@ -20,29 +23,56 @@ type Node struct {
 //   - raft.NewTCPTransport(...) for a real multi-container deployment
 //   - raft.NewInmemTransport(...) for fast in-process tests
 //
-// If bootstrapConfig contains at least one server, the cluster is bootstrapped.
-func StartRaft(nodeID string, store storage.KVStore, transport raft.Transport, bootstrapConfig raft.Configuration) (*Node, error) {
+// Raft's log and stable state are persisted in a BoltDB file under dataDir so
+// that a restarted container can replay its log and rejoin the cluster.
+// If bootstrapConfig contains at least one server and no state exists yet,
+// the cluster is bootstrapped.
+func StartRaft(nodeID string, store storage.KVStore, transport raft.Transport, dataDir string, bootstrapConfig raft.Configuration) (*Node, error) {
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(nodeID)
 
-	// In-memory Raft log/stable/snapshot stores. These can be swapped for
-	// BoltDB later if Raft state needs to survive node restarts.
-	logStore := raft.NewInmemStore()
-	stableStore := raft.NewInmemStore()
-	snapshotStore := raft.NewInmemSnapshotStore()
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
+
+	boltStore, err := raftboltdb.NewBoltStore(filepath.Join(dataDir, "raft.db"))
+	if err != nil {
+		return nil, fmt.Errorf("create bolt store: %w", err)
+	}
+
+	snapshotStore, err := raft.NewFileSnapshotStore(dataDir, 3, os.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("create snapshot store: %w", err)
+	}
 
 	fsm := NewFSM(store)
 
-	r, err := raft.NewRaft(config, fsm, logStore, stableStore, snapshotStore, transport)
+	r, err := raft.NewRaft(config, fsm, boltStore, boltStore, snapshotStore, transport)
 	if err != nil {
 		return nil, fmt.Errorf("create raft: %w", err)
 	}
 
 	if len(bootstrapConfig.Servers) > 0 {
-		if err := r.BootstrapCluster(bootstrapConfig).Error(); err != nil {
-			return nil, fmt.Errorf("bootstrap cluster: %w", err)
+		hasState, err := raft.HasExistingState(boltStore, boltStore, snapshotStore)
+		if err != nil {
+			return nil, fmt.Errorf("check existing state: %w", err)
+		}
+		if !hasState {
+			if err := r.BootstrapCluster(bootstrapConfig).Error(); err != nil {
+				return nil, fmt.Errorf("bootstrap cluster: %w", err)
+			}
 		}
 	}
 
 	return &Node{Raft: r, FSM: fsm}, nil
+}
+
+// AddVoter adds a new voting member to the cluster. It must be called on the
+// leader; otherwise it returns an error naming the current leader.
+func (n *Node) AddVoter(id, addr string) error {
+	if n.Raft.State() != raft.Leader {
+		_, leaderID := n.Raft.LeaderWithID()
+		return fmt.Errorf("not the leader (current leader: %q)", leaderID)
+	}
+	return n.Raft.AddVoter(raft.ServerID(id), raft.ServerAddress(addr), 0, 0).Error()
 }
