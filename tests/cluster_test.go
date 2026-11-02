@@ -12,10 +12,10 @@ import (
 )
 
 func TestClusterHeartbeat(t *testing.T) {
-	// Since docker compose runs nodes on ports 50051-50055, 
+	// Since docker compose runs nodes on ports 50051-50055,
 	// we test against node1 mapped to localhost:50051 during local integration tests.
 	target := "node1:50051"
-	
+
 	// Set up a context with a timeout so the test doesn't hang if the server is down
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

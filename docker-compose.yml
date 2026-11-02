@@ -6,9 +6,12 @@ services:
     container_name: node1
     ports:
       - "50051:50051"
+      - "60051:60051"
     environment:
       - NODE_ID=node1
       - PORT=50051
+      - RAFT_PORT=60051
+      - BOOTSTRAP=true
     networks:
       - cluster-net
   node2:
@@ -16,9 +19,12 @@ services:
     container_name: node2
     ports:
       - "50052:50052"
+      - "60052:60052"
     environment:
       - NODE_ID=node2
       - PORT=50052
+      - RAFT_PORT=60052
+      - BOOTSTRAP=false
     networks:
       - cluster-net
   node3:
@@ -26,9 +32,12 @@ services:
     container_name: node3
     ports:
       - "50053:50053"
+      - "60053:60053"
     environment:
       - NODE_ID=node3
       - PORT=50053
+      - RAFT_PORT=60053
+      - BOOTSTRAP=false
     networks:
       - cluster-net
   node4:
@@ -36,9 +45,12 @@ services:
     container_name: node4
     ports:
       - "50054:50054"
+      - "60054:60054"
     environment:
       - NODE_ID=node4
       - PORT=50054
+      - RAFT_PORT=60054
+      - BOOTSTRAP=false
     networks:
       - cluster-net
   node5:
@@ -46,9 +58,12 @@ services:
     container_name: node5
     ports:
       - "50055:50055"
+      - "60055:60055"
     environment:
       - NODE_ID=node5
       - PORT=50055
+      - RAFT_PORT=60055
+      - BOOTSTRAP=false
     networks:
       - cluster-net
 
