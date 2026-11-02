@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"distributed-kv-store/storage"
 
@@ -11,10 +12,35 @@ import (
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 )
 
-// Node bundles the Raft instance with its FSM so callers can access both.
+// Node bundles the Raft instance with its FSM and the BoltDB store that backs
+// the log. Close must be called on shutdown so the database file lock is
+// released; otherwise a restarted process (or a test) blocks opening the same
+// file again.
 type Node struct {
 	Raft *raft.Raft
 	FSM  *FSM
+
+	bolt *raftboltdb.BoltStore
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// Close shuts down Raft and releases the BoltDB file handle. It is idempotent.
+func (n *Node) Close() error {
+	n.closeOnce.Do(func() {
+		if n.Raft != nil {
+			if err := n.Raft.Shutdown().Error(); err != nil {
+				n.closeErr = err
+			}
+		}
+		if n.bolt != nil {
+			if err := n.bolt.Close(); err != nil && n.closeErr == nil {
+				n.closeErr = err
+			}
+		}
+	})
+	return n.closeErr
 }
 
 // StartRaft initializes a Raft node using the provided transport and store.
@@ -42,6 +68,7 @@ func StartRaft(nodeID string, store storage.KVStore, transport raft.Transport, d
 
 	snapshotStore, err := raft.NewFileSnapshotStore(dataDir, 3, os.Stderr)
 	if err != nil {
+		_ = boltStore.Close()
 		return nil, fmt.Errorf("create snapshot store: %w", err)
 	}
 
@@ -49,22 +76,27 @@ func StartRaft(nodeID string, store storage.KVStore, transport raft.Transport, d
 
 	r, err := raft.NewRaft(config, fsm, boltStore, boltStore, snapshotStore, transport)
 	if err != nil {
+		_ = boltStore.Close()
 		return nil, fmt.Errorf("create raft: %w", err)
 	}
 
 	if len(bootstrapConfig.Servers) > 0 {
 		hasState, err := raft.HasExistingState(boltStore, boltStore, snapshotStore)
 		if err != nil {
+			_ = r.Shutdown().Error()
+			_ = boltStore.Close()
 			return nil, fmt.Errorf("check existing state: %w", err)
 		}
 		if !hasState {
 			if err := r.BootstrapCluster(bootstrapConfig).Error(); err != nil {
+				_ = r.Shutdown().Error()
+				_ = boltStore.Close()
 				return nil, fmt.Errorf("bootstrap cluster: %w", err)
 			}
 		}
 	}
 
-	return &Node{Raft: r, FSM: fsm}, nil
+	return &Node{Raft: r, FSM: fsm, bolt: boltStore}, nil
 }
 
 // AddVoter adds a new voting member to the cluster. It must be called on the

@@ -7,9 +7,11 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"distributed-kv-store/consensus"
@@ -231,6 +233,18 @@ func main() {
 
 	// Optionally join an existing cluster through a live leader.
 	joinCluster(cfg, string(transport.LocalAddr()))
+
+	// Shut down cleanly on SIGINT/SIGTERM so the BoltDB file lock is released
+	// (important for fast container restarts) and in-flight RPCs can drain.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Printf("received shutdown signal, stopping %s", cfg.NodeID)
+		grpcServer.GracefulStop()
+		_ = node.Close()
+		_ = transport.Close()
+	}()
 
 	fmt.Printf("gRPC server listening on port %s\n", cfg.GRPCPort)
 	if err := grpcServer.Serve(lis); err != nil {
