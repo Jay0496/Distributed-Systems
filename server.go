@@ -41,6 +41,7 @@ func (s *server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, 
 	// 2. Wrap the request in a Raft command.
 	cmd := consensus.Command{
 		Op:    "put",
+		Mode:  req.GetMode(),
 		Key:   req.GetKey(),
 		Value: req.GetValue(),
 	}
@@ -64,13 +65,29 @@ func (s *server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, 
 }
 
 func (s *server) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
-	// Read directly from the local store. This will become a linearizable
-	// read-through-Raft path in the next phase.
-	value, err := s.store.Get(req.GetKey())
+	// Reads go through the Raft log so that they observe all previously
+	// committed writes (linearizable reads). Followers will forward in the
+	// next phase.
+	if s.node.Raft.State() != raft.Leader {
+		return &pb.GetResponse{Success: false}, nil
+	}
+
+	cmd := consensus.Command{Op: "get", Key: req.GetKey()}
+	data, err := json.Marshal(cmd)
 	if err != nil {
 		return &pb.GetResponse{Success: false}, nil
 	}
-	return &pb.GetResponse{Success: true, Value: value}, nil
+
+	future := s.node.Raft.Apply(data, 10*time.Second)
+	if err := future.Error(); err != nil {
+		return &pb.GetResponse{Success: false}, nil
+	}
+
+	result, ok := future.Response().(*consensus.GetResult)
+	if !ok || !result.Found || result.Err != "" {
+		return &pb.GetResponse{Success: false}, nil
+	}
+	return &pb.GetResponse{Success: true, Value: result.Value}, nil
 }
 
 func (s *server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {

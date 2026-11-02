@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"errors"
 	"sync"
 )
@@ -44,4 +45,27 @@ func (m *MockStore) Get(key string) ([]byte, error) {
 	valCopy := make([]byte, len(val))
 	copy(valCopy, val)
 	return valCopy, nil
+}
+
+// Snapshot serializes the entire store as JSON.
+func (m *MockStore) Snapshot() ([]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return json.Marshal(m.data)
+}
+
+// Restore replaces the store contents with a JSON snapshot.
+func (m *MockStore) Restore(data []byte) error {
+	var restored map[string][]byte
+	if err := json.Unmarshal(data, &restored); err != nil {
+		return err
+	}
+	if restored == nil {
+		restored = make(map[string][]byte)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data = restored
+	return nil
 }

@@ -12,9 +12,18 @@ import (
 // Command represents an operation that will be serialized into the Raft log
 // and later applied to the state machine.
 type Command struct {
-	Op    string // "put"
+	Op    string // "put" or "get"
+	Mode  string // "replication" or "rs32" (empty means default)
 	Key   string
 	Value []byte
+}
+
+// GetResult is returned by the FSM for "get" commands so that reads can be
+// served from the committed log (linearizable reads).
+type GetResult struct {
+	Value []byte
+	Found bool
+	Err   string
 }
 
 // FSM is the Finite State Machine that Raft uses to apply committed log entries.
@@ -40,27 +49,55 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 	switch cmd.Op {
 	case "put":
 		return f.store.Put(cmd.Key, cmd.Value, false)
+	case "get":
+		value, err := f.store.Get(cmd.Key)
+		if err != nil {
+			return &GetResult{Found: false}
+		}
+		return &GetResult{Value: value, Found: true}
 	default:
 		return nil
 	}
 }
 
-// Snapshot returns a snapshot of the current state. (Skeleton implementation.)
+// Snapshot returns a snapshot of the current state.
 func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
-	return &fsmSnapshot{store: f.store}, nil
+	var data []byte
+	if snapshotter, ok := f.store.(storage.Snapshotter); ok {
+		var err error
+		data, err = snapshotter.Snapshot()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &fsmSnapshot{data: data}, nil
 }
 
-// Restore restores the state from a snapshot. (Skeleton implementation.)
+// Restore restores the state from a snapshot.
 func (f *FSM) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
-	return nil
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return err
+	}
+
+	snapshotter, ok := f.store.(storage.Snapshotter)
+	if !ok {
+		return nil
+	}
+	return snapshotter.Restore(data)
 }
 
 type fsmSnapshot struct {
-	store storage.KVStore
+	data []byte
 }
 
 func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
+	if _, err := sink.Write(s.data); err != nil {
+		_ = sink.Cancel()
+		return err
+	}
 	return sink.Close()
 }
 
