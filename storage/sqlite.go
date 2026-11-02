@@ -11,7 +11,7 @@ func InitDB(filepath string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	query := `CREATE TABLE IF NOT EXISTS store (key TEXT PRIMARY KEY, value BLOB, is_parity BOOLEAN);`
 	_, err = db.Exec(query)
 	return db, err

@@ -1,8 +1,8 @@
 package storage
 
 import (
-	"testing"
 	"os"
+	"testing"
 )
 
 func TestInitDB(t *testing.T) {

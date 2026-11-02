@@ -1,4 +1,11 @@
-version: '3.8'
+x-common-env: &common-env
+  DATA_DIR: /data
+  PEERS: node1=node1:50051,node2=node2:50052,node3=node3:50053,node4=node4:50054,node5=node5:50055
+
+x-healthcheck: &healthcheck
+  interval: 5s
+  timeout: 3s
+  retries: 12
 
 services:
   node1:
@@ -6,52 +13,121 @@ services:
     container_name: node1
     ports:
       - "50051:50051"
+      - "60051:60051"
+    volumes:
+      - node1-data:/data
     environment:
-      - NODE_ID=node1
-      - PORT=50051
+      <<: *common-env
+      NODE_ID: node1
+      PORT: "50051"
+      RAFT_PORT: "60051"
+      BOOTSTRAP: "true"
+      BOOTSTRAP_SERVERS: node1=node1:60051,node2=node2:60052,node3=node3:60053,node4=node4:60054,node5=node5:60055
     networks:
       - cluster-net
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/app/healthcheck", "-addr", "localhost:50051"]
+
   node2:
     build: .
     container_name: node2
     ports:
       - "50052:50052"
+      - "60052:60052"
+    volumes:
+      - node2-data:/data
     environment:
-      - NODE_ID=node2
-      - PORT=50052
+      <<: *common-env
+      NODE_ID: node2
+      PORT: "50052"
+      RAFT_PORT: "60052"
+      BOOTSTRAP: "false"
     networks:
       - cluster-net
+    depends_on:
+      node1:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/app/healthcheck", "-addr", "localhost:50052"]
+
   node3:
     build: .
     container_name: node3
     ports:
       - "50053:50053"
+      - "60053:60053"
+    volumes:
+      - node3-data:/data
     environment:
-      - NODE_ID=node3
-      - PORT=50053
+      <<: *common-env
+      NODE_ID: node3
+      PORT: "50053"
+      RAFT_PORT: "60053"
+      BOOTSTRAP: "false"
     networks:
       - cluster-net
+    depends_on:
+      node1:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/app/healthcheck", "-addr", "localhost:50053"]
+
   node4:
     build: .
     container_name: node4
     ports:
       - "50054:50054"
+      - "60054:60054"
+    volumes:
+      - node4-data:/data
     environment:
-      - NODE_ID=node4
-      - PORT=50054
+      <<: *common-env
+      NODE_ID: node4
+      PORT: "50054"
+      RAFT_PORT: "60054"
+      BOOTSTRAP: "false"
     networks:
       - cluster-net
+    depends_on:
+      node1:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/app/healthcheck", "-addr", "localhost:50054"]
+
   node5:
     build: .
     container_name: node5
     ports:
       - "50055:50055"
+      - "60055:60055"
+    volumes:
+      - node5-data:/data
     environment:
-      - NODE_ID=node5
-      - PORT=50055
+      <<: *common-env
+      NODE_ID: node5
+      PORT: "50055"
+      RAFT_PORT: "60055"
+      BOOTSTRAP: "false"
     networks:
       - cluster-net
+    depends_on:
+      node1:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/app/healthcheck", "-addr", "localhost:50055"]
 
 networks:
   cluster-net:
     driver: bridge
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:

@@ -19,9 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	StorageService_Put_FullMethodName       = "/storage.StorageService/Put"
-	StorageService_Get_FullMethodName       = "/storage.StorageService/Get"
-	StorageService_Heartbeat_FullMethodName = "/storage.StorageService/Heartbeat"
+	StorageService_Put_FullMethodName              = "/storage.StorageService/Put"
+	StorageService_Get_FullMethodName              = "/storage.StorageService/Get"
+	StorageService_Heartbeat_FullMethodName        = "/storage.StorageService/Heartbeat"
+	StorageService_Join_FullMethodName             = "/storage.StorageService/Join"
+	StorageService_NodeStatus_FullMethodName       = "/storage.StorageService/NodeStatus"
+	StorageService_UploadFragment_FullMethodName   = "/storage.StorageService/UploadFragment"
+	StorageService_DownloadFragment_FullMethodName = "/storage.StorageService/DownloadFragment"
+	StorageService_Repair_FullMethodName           = "/storage.StorageService/Repair"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -31,6 +36,17 @@ type StorageServiceClient interface {
 	Put(ctx context.Context, in *PutRequest, opts ...grpc.CallOption) (*PutResponse, error)
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
+	// Join asks the current leader to add a new voter to the Raft cluster.
+	Join(ctx context.Context, in *JoinRequest, opts ...grpc.CallOption) (*JoinResponse, error)
+	// NodeStatus reports the local node's Raft state for diagnostics and tests.
+	NodeStatus(ctx context.Context, in *NodeStatusRequest, opts ...grpc.CallOption) (*NodeStatusResponse, error)
+	// Fragment streaming is the transport used by the redundancy engine to
+	// move Reed-Solomon data and parity chunks between nodes.
+	UploadFragment(ctx context.Context, opts ...grpc.CallOption) (StorageService_UploadFragmentClient, error)
+	DownloadFragment(ctx context.Context, in *FragmentRequest, opts ...grpc.CallOption) (StorageService_DownloadFragmentClient, error)
+	// Repair is the entry point for the failure-management subsystem to ask a
+	// node to rebuild a missing fragment.
+	Repair(ctx context.Context, in *RepairRequest, opts ...grpc.CallOption) (*RepairResponse, error)
 }
 
 type storageServiceClient struct {
@@ -68,6 +84,99 @@ func (c *storageServiceClient) Heartbeat(ctx context.Context, in *HeartbeatReque
 	return out, nil
 }
 
+func (c *storageServiceClient) Join(ctx context.Context, in *JoinRequest, opts ...grpc.CallOption) (*JoinResponse, error) {
+	out := new(JoinResponse)
+	err := c.cc.Invoke(ctx, StorageService_Join_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) NodeStatus(ctx context.Context, in *NodeStatusRequest, opts ...grpc.CallOption) (*NodeStatusResponse, error) {
+	out := new(NodeStatusResponse)
+	err := c.cc.Invoke(ctx, StorageService_NodeStatus_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) UploadFragment(ctx context.Context, opts ...grpc.CallOption) (StorageService_UploadFragmentClient, error) {
+	stream, err := c.cc.NewStream(ctx, &StorageService_ServiceDesc.Streams[0], StorageService_UploadFragment_FullMethodName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &storageServiceUploadFragmentClient{stream}
+	return x, nil
+}
+
+type StorageService_UploadFragmentClient interface {
+	Send(*FragmentChunk) error
+	CloseAndRecv() (*FragmentResponse, error)
+	grpc.ClientStream
+}
+
+type storageServiceUploadFragmentClient struct {
+	grpc.ClientStream
+}
+
+func (x *storageServiceUploadFragmentClient) Send(m *FragmentChunk) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *storageServiceUploadFragmentClient) CloseAndRecv() (*FragmentResponse, error) {
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	m := new(FragmentResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (c *storageServiceClient) DownloadFragment(ctx context.Context, in *FragmentRequest, opts ...grpc.CallOption) (StorageService_DownloadFragmentClient, error) {
+	stream, err := c.cc.NewStream(ctx, &StorageService_ServiceDesc.Streams[1], StorageService_DownloadFragment_FullMethodName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &storageServiceDownloadFragmentClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type StorageService_DownloadFragmentClient interface {
+	Recv() (*FragmentChunk, error)
+	grpc.ClientStream
+}
+
+type storageServiceDownloadFragmentClient struct {
+	grpc.ClientStream
+}
+
+func (x *storageServiceDownloadFragmentClient) Recv() (*FragmentChunk, error) {
+	m := new(FragmentChunk)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (c *storageServiceClient) Repair(ctx context.Context, in *RepairRequest, opts ...grpc.CallOption) (*RepairResponse, error) {
+	out := new(RepairResponse)
+	err := c.cc.Invoke(ctx, StorageService_Repair_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility
@@ -75,6 +184,17 @@ type StorageServiceServer interface {
 	Put(context.Context, *PutRequest) (*PutResponse, error)
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
+	// Join asks the current leader to add a new voter to the Raft cluster.
+	Join(context.Context, *JoinRequest) (*JoinResponse, error)
+	// NodeStatus reports the local node's Raft state for diagnostics and tests.
+	NodeStatus(context.Context, *NodeStatusRequest) (*NodeStatusResponse, error)
+	// Fragment streaming is the transport used by the redundancy engine to
+	// move Reed-Solomon data and parity chunks between nodes.
+	UploadFragment(StorageService_UploadFragmentServer) error
+	DownloadFragment(*FragmentRequest, StorageService_DownloadFragmentServer) error
+	// Repair is the entry point for the failure-management subsystem to ask a
+	// node to rebuild a missing fragment.
+	Repair(context.Context, *RepairRequest) (*RepairResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -90,6 +210,21 @@ func (UnimplementedStorageServiceServer) Get(context.Context, *GetRequest) (*Get
 }
 func (UnimplementedStorageServiceServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Heartbeat not implemented")
+}
+func (UnimplementedStorageServiceServer) Join(context.Context, *JoinRequest) (*JoinResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Join not implemented")
+}
+func (UnimplementedStorageServiceServer) NodeStatus(context.Context, *NodeStatusRequest) (*NodeStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method NodeStatus not implemented")
+}
+func (UnimplementedStorageServiceServer) UploadFragment(StorageService_UploadFragmentServer) error {
+	return status.Errorf(codes.Unimplemented, "method UploadFragment not implemented")
+}
+func (UnimplementedStorageServiceServer) DownloadFragment(*FragmentRequest, StorageService_DownloadFragmentServer) error {
+	return status.Errorf(codes.Unimplemented, "method DownloadFragment not implemented")
+}
+func (UnimplementedStorageServiceServer) Repair(context.Context, *RepairRequest) (*RepairResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Repair not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 
@@ -158,6 +293,107 @@ func _StorageService_Heartbeat_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_Join_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JoinRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Join(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Join_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Join(ctx, req.(*JoinRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_NodeStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NodeStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).NodeStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_NodeStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).NodeStatus(ctx, req.(*NodeStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_UploadFragment_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(StorageServiceServer).UploadFragment(&storageServiceUploadFragmentServer{stream})
+}
+
+type StorageService_UploadFragmentServer interface {
+	SendAndClose(*FragmentResponse) error
+	Recv() (*FragmentChunk, error)
+	grpc.ServerStream
+}
+
+type storageServiceUploadFragmentServer struct {
+	grpc.ServerStream
+}
+
+func (x *storageServiceUploadFragmentServer) SendAndClose(m *FragmentResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *storageServiceUploadFragmentServer) Recv() (*FragmentChunk, error) {
+	m := new(FragmentChunk)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func _StorageService_DownloadFragment_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(FragmentRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(StorageServiceServer).DownloadFragment(m, &storageServiceDownloadFragmentServer{stream})
+}
+
+type StorageService_DownloadFragmentServer interface {
+	Send(*FragmentChunk) error
+	grpc.ServerStream
+}
+
+type storageServiceDownloadFragmentServer struct {
+	grpc.ServerStream
+}
+
+func (x *storageServiceDownloadFragmentServer) Send(m *FragmentChunk) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func _StorageService_Repair_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RepairRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Repair(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Repair_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Repair(ctx, req.(*RepairRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -177,7 +413,30 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Heartbeat",
 			Handler:    _StorageService_Heartbeat_Handler,
 		},
+		{
+			MethodName: "Join",
+			Handler:    _StorageService_Join_Handler,
+		},
+		{
+			MethodName: "NodeStatus",
+			Handler:    _StorageService_NodeStatus_Handler,
+		},
+		{
+			MethodName: "Repair",
+			Handler:    _StorageService_Repair_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "UploadFragment",
+			Handler:       _StorageService_UploadFragment_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "DownloadFragment",
+			Handler:       _StorageService_DownloadFragment_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "proto/storage.proto",
 }

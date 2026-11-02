@@ -6,6 +6,21 @@ service StorageService {
   rpc Put (PutRequest) returns (PutResponse);
   rpc Get (GetRequest) returns (GetResponse);
   rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Join asks the current leader to add a new voter to the Raft cluster.
+  rpc Join (JoinRequest) returns (JoinResponse);
+
+  // NodeStatus reports the local node's Raft state for diagnostics and tests.
+  rpc NodeStatus (NodeStatusRequest) returns (NodeStatusResponse);
+
+  // Fragment streaming is the transport used by the redundancy engine to
+  // move Reed-Solomon data and parity chunks between nodes.
+  rpc UploadFragment (stream FragmentChunk) returns (FragmentResponse);
+  rpc DownloadFragment (FragmentRequest) returns (stream FragmentChunk);
+
+  // Repair is the entry point for the failure-management subsystem to ask a
+  // node to rebuild a missing fragment.
+  rpc Repair (RepairRequest) returns (RepairResponse);
 }
 
 message PutRequest {
@@ -34,4 +49,55 @@ message HeartbeatRequest {
 
 message HeartbeatResponse {
   bool alive = 1;
+}
+
+message JoinRequest {
+  string node_id = 1;
+  string raft_addr = 2;
+  string grpc_addr = 3;
+}
+
+message JoinResponse {
+  bool success = 1;
+  string message = 2;
+  string leader_id = 3;
+}
+
+message NodeStatusRequest {}
+
+message NodeStatusResponse {
+  string node_id = 1;
+  string state = 2;
+  string leader_id = 3;
+  string leader_addr = 4;
+  uint64 term = 5;
+  uint64 commit_index = 6;
+  uint64 applied_index = 7;
+  uint64 last_index = 8;
+}
+
+message FragmentChunk {
+  string key = 1;
+  int32 index = 2;
+  bytes data = 3;
+  bool is_parity = 4;
+}
+
+message FragmentResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message FragmentRequest {
+  string key = 1;
+  int32 index = 2;
+}
+
+message RepairRequest {
+  string key = 1;
+}
+
+message RepairResponse {
+  bool success = 1;
+  string message = 2;
 }
