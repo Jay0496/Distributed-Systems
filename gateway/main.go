@@ -1,25 +1,105 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"time"
+
+	pb "distributed-kv-store/proto"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
+const rpcTimeout = 5 * time.Second
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run main.go <put|get|mode> [arguments...]")
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, usage())
 		os.Exit(1)
 	}
+}
 
-	command := os.Args[1]
-	switch command {
-	case "put":
-		fmt.Println("TODO: Implement PUT logic and consistent hash routing")
-	case "get":
-		fmt.Println("TODO: Implement GET logic")
-	case "mode":
-		fmt.Println("TODO: Implement redundancy mode toggle")
-	default:
-		fmt.Printf("Unknown command: %s\n", command)
+func run(args []string) error {
+	if len(args) == 0 {
+		return errors.New("a command is required")
 	}
+
+	switch args[0] {
+	case "put":
+		if len(args) != 3 {
+			return errors.New("put requires a key and value")
+		}
+		return executePut(NewRouter(100).GetNode(args[1]), args[1], args[2], "")
+	case "get":
+		if len(args) != 2 {
+			return errors.New("get requires a key")
+		}
+		return executeGet(NewRouter(100).GetNode(args[1]), args[1])
+	case "mode":
+		if len(args) != 2 {
+			return errors.New("mode requires replication or rs32")
+		}
+		if args[1] != "replication" && args[1] != "rs32" {
+			return fmt.Errorf("invalid mode %q: expected replication or rs32", args[1])
+		}
+		return executePut("localhost:50051", "", "", args[1])
+	default:
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func usage() string {
+	return "Usage:\n  go run . put <key> <val>\n  go run . get <key>\n  go run . mode <replication|rs32>"
+}
+
+func executePut(addr, key, value, mode string) error {
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("connect to %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+	defer cancel()
+
+	resp, err := pb.NewStorageServiceClient(conn).Put(ctx, &pb.PutRequest{
+		Key:   key,
+		Value: []byte(value),
+		Mode:  mode,
+	})
+	if err != nil {
+		return fmt.Errorf("put RPC to %s: %w", addr, err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("put rejected by %s: %s", addr, resp.GetMessage())
+	}
+
+	fmt.Printf("Put succeeded on %s: %s\n", addr, resp.GetMessage())
+	return nil
+}
+
+func executeGet(addr, key string) error {
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("connect to %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+	defer cancel()
+
+	resp, err := pb.NewStorageServiceClient(conn).Get(ctx, &pb.GetRequest{Key: key})
+	if err != nil {
+		return fmt.Errorf("get RPC to %s: %w", addr, err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("get rejected by %s", addr)
+	}
+
+	fmt.Printf("Get succeeded on %s: %s\n", addr, string(resp.GetValue()))
+	return nil
 }
