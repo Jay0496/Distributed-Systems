@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"distributed-kv-store/consensus"
+	"distributed-kv-store/internal/config"
 	"distributed-kv-store/storage"
 
 	pb "distributed-kv-store/proto"
@@ -31,7 +32,7 @@ type server struct {
 	pb.UnimplementedStorageServiceServer
 	store storage.KVStore
 	node  *consensus.Node
-	cfg   Config
+	cfg   config.Config
 	redun RedundancyEngine
 
 	connMu sync.Mutex
@@ -41,7 +42,7 @@ type server struct {
 
 // newServer builds a server with its connection cache and redundancy hook.
 // A nil dial uses the production gRPC dialer.
-func newServer(cfg Config, store storage.KVStore, node *consensus.Node, dial dialFunc) *server {
+func newServer(cfg config.Config, store storage.KVStore, node *consensus.Node, dial dialFunc) *server {
 	if dial == nil {
 		dial = newDialFunc(cfg)
 	}
@@ -166,7 +167,7 @@ func (s *server) NodeStatus(ctx context.Context, req *pb.NodeStatusRequest) (*pb
 }
 
 func main() {
-	cfg := loadConfig()
+	cfg := config.Load()
 
 	fmt.Printf("Starting %s (gRPC on %s, Raft on %s, data dir %s)...\n", cfg.NodeID, cfg.GRPCPort, cfg.RaftPort, cfg.DataDir)
 
@@ -255,7 +256,7 @@ func main() {
 // joinCluster asks the node configured in JOIN_ADDR to add this node as a
 // voter. It retries so that startup ordering between containers does not
 // matter.
-func joinCluster(cfg Config, raftAddr string) {
+func joinCluster(cfg config.Config, raftAddr string) {
 	if cfg.JoinAddr == "" {
 		return
 	}

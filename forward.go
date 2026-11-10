@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"distributed-kv-store/internal/config"
+
 	pb "distributed-kv-store/proto"
 
 	"google.golang.org/grpc"
@@ -24,7 +26,7 @@ const (
 type dialFunc func(ctx context.Context, target string) (*grpc.ClientConn, error)
 
 // newDialFunc returns the production dialer. TLS is used when configured.
-func newDialFunc(cfg Config) dialFunc {
+func newDialFunc(cfg config.Config) dialFunc {
 	return func(ctx context.Context, target string) (*grpc.ClientConn, error) {
 		var opts []grpc.DialOption
 		if cfg.TLSEnabled {

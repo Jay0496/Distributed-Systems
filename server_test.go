@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"distributed-kv-store/consensus"
+	"distributed-kv-store/internal/config"
 	"distributed-kv-store/storage"
 
 	pb "distributed-kv-store/proto"
@@ -130,7 +131,7 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 
 	// 4. Start the gRPC front ends.
 	for _, tn := range c.nodes {
-		cfg := Config{
+		cfg := config.Config{
 			NodeID:  tn.id,
 			DataDir: t.TempDir(),
 			Peers:   peers,
