@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"distributed-kv-store/consensus"
 	"distributed-kv-store/internal/config"
-	"distributed-kv-store/storage"
+	"distributed-kv-store/internal/consensus"
+	"distributed-kv-store/internal/storage"
 
 	pb "distributed-kv-store/proto"
 

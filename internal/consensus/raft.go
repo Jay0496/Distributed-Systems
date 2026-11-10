@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"distributed-kv-store/storage"
+	"distributed-kv-store/internal/storage"
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
