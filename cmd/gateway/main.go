@@ -55,7 +55,7 @@ func run(args []string) error {
 }
 
 func usage() string {
-	return "Usage:\n  go run . put <key> <val>\n  go run . get <key>\n  go run . mode <replication|rs32>"
+	return "Usage:\n  go run ./cmd/gateway put <key> <val>\n  go run ./cmd/gateway get <key>\n  go run ./cmd/gateway mode <replication|rs32>"
 }
 
 func executePut(addr, key, value, mode string) error {

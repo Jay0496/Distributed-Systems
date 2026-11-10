@@ -48,10 +48,44 @@ flowchart TB
     F1 -->|"forward Put/Get<br/>x-kv-forwarded"| G2
 ```
 
-Every node runs exactly the same binary. `server` is the gRPC front end,
-`consensus.Node` owns the Raft instance and the FSM, and `storage.KVStore` is
-the state-machine backend. Raft log and stable state live in BoltDB; snapshots
-live on the filesystem.
+Every node runs exactly the same binary. `internal/server` is the gRPC front end,
+`internal/consensus.Node` owns the Raft instance and the FSM, and
+`internal/storage.KVStore` is the state-machine backend. Raft log and stable
+state live in BoltDB; snapshots live on the filesystem.
+
+## Package layout
+
+```text
+cmd/server        process wiring, flags, startup/shutdown
+cmd/gateway       CLI entrypoint (argument parsing and gRPC calls)
+cmd/healthcheck   Compose health probe
+cmd/bench         benchmark harness placeholder
+
+internal/config      environment parsing and validation
+internal/server      gRPC handlers, forwarding, fragment transport
+internal/consensus   Raft node, FSM, metadata commands
+internal/storage     Store interface, SQLite store, temporary MockStore
+internal/redundancy  redundancy-engine seam and mode validation (no-op today)
+internal/gateway     consistent-hash router
+internal/cluster     failure detection and repair (created now, populated later)
+
+proto/               storage.proto and committed generated code
+tests/               support, unit, integration, chaos, and bench suites
+```
+
+Dependency direction:
+
+- `cmd/*` imports domain packages and contains only process/CLI wiring.
+- `internal/server` may import `internal/consensus`, `internal/storage`,
+  `internal/redundancy`, `internal/config`, and `internal/cluster`.
+- Domain packages must never import `internal/server`, `internal/gateway`, or
+  `cmd/*`.
+- `tests/support` is test-only; production packages must not import it.
+
+The package move was behaviour-preserving. `internal/storage.MockStore` and
+`internal/redundancy.NoopRedundancy` remain only as documented temporary
+placeholders for the SQLite and redundancy tasks; see
+[tests/README.md](../tests/README.md).
 
 ## Request path
 

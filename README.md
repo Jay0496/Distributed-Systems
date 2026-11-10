@@ -12,14 +12,16 @@ each node keeps its own persistent Raft log on disk.
 | Area | Owner | State |
 | --- | --- | --- |
 | Raft consensus, snapshots, forwarding, gRPC surface | Jay Savaliya | Complete for this phase |
-| CLI / routing gateway | Khalid | In progress (`gateway/`) |
-| SQLite persistence | Parth | In progress (`storage/sqlite.go`) |
-| Failure management / Reed-Solomon redundancy | Dhruvin | Interface scaffolded (`redundancy.go`, `Repair`) |
+| CLI / routing gateway | Khalid | In progress (`cmd/gateway/`, `internal/gateway/`) |
+| SQLite persistence | Parth | In progress (`internal/storage/sqlite.go`) |
+| Failure management / Reed-Solomon redundancy | Dhruvin | Interface scaffolded (`internal/redundancy`, `internal/server/fragments.go`) |
 
 The server currently injects `storage.NewMockStore()` behind the `storage.KVStore`
-interface. When the SQLite store finishes, it can be swapped in without touching
-the consensus code, because the FSM only depends on `KVStore` (plus the optional
-`storage.Snapshotter` interface).
+interface (`internal/storage`). `MockStore` is a temporary development double;
+when the SQLite store finishes, it can be swapped in without touching the
+consensus code, because the FSM only depends on `KVStore` (plus the optional
+`storage.Snapshotter` interface). The placeholder is documented in
+[tests/README.md](tests/README.md).
 
 ## Architecture at a glance
 
@@ -38,18 +40,22 @@ state layout, and recovery behaviour. Design trade-offs are recorded in
 
 | Path | Purpose |
 | --- | --- |
-| `server.go` | gRPC server: `Put`, `Get`, `Heartbeat`, `Join`, `NodeStatus`; startup, TLS, health, graceful shutdown |
-| `forward.go` | Leader discovery, cached client connections, one-hop forwarding, retry and loop guard |
-| `fragments.go` | `UploadFragment`, `DownloadFragment`, `Repair` handlers |
-| `redundancy.go` | `RedundancyEngine` seam (no-op today) and redundancy-mode validation |
-| `config.go` | Environment configuration parsing |
-| `consensus/raft.go` | Raft node: BoltDB log/stable store, file snapshots, bootstrap, `AddVoter`, `Close` |
-| `consensus/fsm.go` | FSM: put/get commands, real snapshot and restore |
-| `storage/` | `KVStore`, `Snapshotter`, in-memory `MockStore`, SQLite work in progress |
-| `proto/storage.proto` | gRPC contract (generated files are committed) |
-| `gateway/` | CLI client and routing (owned by another teammate) |
+| `cmd/server/` | Process entrypoint: config loading, Raft/gRPC startup, TLS, health, signals |
+| `cmd/gateway/` | CLI entrypoint: argument parsing and gRPC client calls |
 | `cmd/healthcheck/` | Tiny binary used by Docker Compose health checks |
-| `tests/` | Cluster-level integration tests behind the `integration` build tag |
+| `cmd/bench/` | Benchmark harness placeholder |
+| `internal/config/` | Environment configuration parsing |
+| `internal/server/` | gRPC handlers: `Put`, `Get`, `Heartbeat`, `Join`, `NodeStatus`, fragments, repair |
+| `internal/server/forward.go` | Leader discovery, cached client connections, one-hop forwarding, retry and loop guard |
+| `internal/server/fragments.go` | `UploadFragment`, `DownloadFragment`, `Repair` handlers |
+| `internal/redundancy/` | `RedundancyEngine` seam (no-op today) and redundancy-mode validation |
+| `internal/consensus/raft.go` | Raft node: BoltDB log/stable store, file snapshots, bootstrap, `AddVoter`, `Close` |
+| `internal/consensus/fsm.go` | FSM: put/get commands, real snapshot and restore |
+| `internal/storage/` | `KVStore`, `Snapshotter`, in-memory `MockStore`, SQLite work in progress |
+| `internal/gateway/` | Consistent-hash router |
+| `internal/cluster/` | Failure detection, degraded-mode reporting, repair scheduling (created now, populated later) |
+| `proto/storage.proto` | gRPC contract (generated files are committed) |
+| `tests/` | Unit, integration, chaos, and benchmark suites (see `tests/README.md`) |
 
 ## Ports
 
@@ -130,8 +136,10 @@ docker run --rm --network distributed-systems_cluster-net -v ${PWD}:/app -w /app
 ```
 
 The integration package is excluded from `go test ./...` by a build tag, so the
-default test command stays green without Docker Compose running. Details and the
-full test matrix are in [docs/TESTING.md](docs/TESTING.md).
+default test command stays green without Docker Compose running. Details, the
+target layout, and the white-box exceptions are in
+[tests/README.md](tests/README.md); the full test matrix is in
+[docs/TESTING.md](docs/TESTING.md).
 
 ## Persistence
 
@@ -162,7 +170,7 @@ volumes resets the node completely.
 
 ## Roadmap
 
-- Replace `MockStore` with the SQLite `KVStore` implementation (`storage/sqlite.go`).
+- Replace `MockStore` with the SQLite `KVStore` implementation (`internal/storage/sqlite.go`).
 - Wire the CLI/gateway routing layer to the gRPC API.
-- Implement Reed-Solomon `rs32` encoding in `redundancy.go` and real repair in `fragments.go`.
+- Implement Reed-Solomon `rs32` encoding in `internal/redundancy` and real repair in `internal/server/fragments.go`.
 - Add certificate provisioning for the optional TLS mode.

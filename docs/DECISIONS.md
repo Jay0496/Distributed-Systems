@@ -6,6 +6,7 @@
 | ADR-002 | Serve linearizable reads through the Raft log | Accepted |
 | ADR-003 | Make TLS optional and off by default | Accepted |
 | ADR-004 | Static full-cluster bootstrap plus a dynamic `Join` RPC | Accepted |
+| ADR-005 | Domain-oriented `cmd/` and `internal/` package layout | Accepted |
 
 ---
 
@@ -221,3 +222,63 @@ can diverge from the rest.
   single-node commitment window and makes fresh-cluster startup order-sensitive.
 - **External service discovery (Consul, etcd, DNS SRV).** Rejected: unnecessary
   infrastructure for a five-node Compose deployment.
+
+---
+
+## ADR-005: Domain-oriented `cmd/` and `internal/` package layout
+
+**Date:** 2026-11-10
+**Status:** Accepted
+
+### Context
+
+The first phase accumulated domain logic in the root `main` package, kept
+`consensus/`, `storage/`, and `gateway/` at the top level, and mixed the gateway
+CLI with its router. That makes ownership unclear, blocks black-box tests, and
+forces every later feature stack to touch the same root files.
+
+### Decision
+
+Reorganize the repository into process entrypoints under `cmd/` and domain
+packages under `internal/`:
+
+- `cmd/server`, `cmd/gateway`, `cmd/healthcheck`, `cmd/bench` hold process
+  wiring and flag/argument parsing only.
+- `internal/config`, `internal/server`, `internal/consensus`, `internal/storage`,
+  `internal/redundancy`, `internal/gateway`, `internal/cluster` hold domain code.
+- Tests that use exported APIs move under `tests/`; tests that need unexported
+  internals stay next to the package and are listed in `tests/README.md`.
+- `internal/` is appropriate because this is an application, not a published
+  library; the interfaces inside it remain the extension points.
+
+### Rationale
+
+- A feature stack (SQLite, redundancy, fragment transport) can change one
+  package without conflicting with the others.
+- The import graph becomes enforceable: domain packages never import the server
+  or the gateway, and `cmd/*` contains no business logic.
+- Process startup/signal handling is separated from handler behaviour, so
+  handlers can be tested over `bufconn` without running a process.
+
+### Consequences
+
+**Positive**
+
+- Clear ownership and smaller, reviewable diffs for every later task.
+- Import cycles are easy to spot and reject in review.
+- Test seams are documented instead of implicit.
+
+**Negative**
+
+- One large behaviour-preserving move before feature work starts.
+- Build commands and documentation must switch to `./cmd/...` paths.
+- White-box tests remain temporarily next to their packages until the test-suite
+  task finishes the move.
+
+### Alternatives considered
+
+- **Keep the root `main` package and add subpackages incrementally.** Rejected:
+  it preserves the import-cycle risk and leaves process wiring mixed with
+  handlers.
+- **Move everything to `pkg/`.** Rejected: nothing here is intended for external
+  consumption, so `internal/` communicates the boundary more accurately.
