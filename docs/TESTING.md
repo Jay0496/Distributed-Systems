@@ -13,14 +13,19 @@ On macOS/Linux, replace `${PWD}` with `$(pwd)`.
 
 | File | Level | What it covers | Needs Compose? |
 | --- | --- | --- | --- |
-| `storage/mock_store_test.go` | unit | put/get, missing keys, defensive copying, snapshot/restore, 64 concurrent writers/readers | no |
-| `consensus/fsm_test.go` | unit | put, get, missing key, bad JSON, unknown op, snapshot persistence and restore, stores without `Snapshotter` | no |
-| `consensus/raft_test.go` | component | 3-node election and replication, leader failover, BoltDB log replay after restart, snapshot restore after restart | no (in-memory transports) |
-| `server_test.go` | component | gRPC handlers over `bufconn`: leader writes, follower forwarding, linearizable reads, `NodeStatus` agreement, health, mode validation, fragments, repair, loop guard, `Join` | no (in-process Raft + bufconn) |
+| `tests/unit/config/config_test.go` | unit | defaults, env overrides, peer-map parsing, malformed entries, whitespace | no |
+| `internal/storage/mock_store_test.go` | unit | put/get, missing keys, defensive copying, snapshot/restore, 64 concurrent writers/readers | no |
+| `internal/storage/sqlite_test.go` | unit | SQLite persistence across reopen, data/parity round trips, concurrency | no |
+| `internal/consensus/fsm_test.go` | unit | put, get, missing key, bad JSON, unknown op, snapshot persistence and restore, stores without `Snapshotter` | no |
+| `internal/consensus/raft_test.go` | component | 3-node election and replication, leader failover, BoltDB log replay after restart, snapshot restore after restart | no (in-memory transports) |
+| `internal/gateway/router_test.go` | unit | deterministic routing, key distribution, ring wrap-around, empty ring | no |
+| `internal/server/server_test.go` | component | gRPC handlers over `bufconn`: leader writes, follower forwarding, linearizable reads, `NodeStatus` agreement, health, mode validation, fragments, repair, loop guard, `Join` | no (in-process Raft + bufconn) |
 | `tests/cluster_test.go` | integration | five-node heartbeat, leader agreement, write through a follower, read from every node | yes (`-tags=integration`) |
 
 The integration file carries `//go:build integration`, so the default
-`go test ./...` is green even when no cluster is running.
+`go test ./...` is green even when no cluster is running. The target layout,
+build tags, and temporary white-box exceptions are documented in
+[tests/README.md](../tests/README.md).
 
 ## Unit and component tests
 
@@ -29,10 +34,10 @@ The integration file carries `//go:build integration`, so the default
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -count=1 ./...
 
 # One package, verbose
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./consensus/...
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./internal/consensus/...
 
 # One test
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -run TestRaftLeaderFailover ./consensus/
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -run TestRaftLeaderFailover ./internal/consensus/
 ```
 
 Static checks:
@@ -49,15 +54,15 @@ excluded by build tags, so integration code can rot silently.
 
 ### How the in-process gRPC tests work
 
-`server_test.go` builds a real three-node Raft cluster with
+`internal/server/server_test.go` builds a real three-node Raft cluster with
 `raft.NewInmemTransport`, then puts a gRPC server in front of each node on a
 `bufconn` listener. Each node is constructed with an injected dial function:
 
 ```go
-srv := newServer(cfg, store, node, dial) // dial resolves "node2" to its bufconn listener
+srv := server.New(cfg, store, node, dial) // dial resolves "node2" to its bufconn listener
 ```
 
-That injection is the reason `forward.go` takes a `dialFunc` rather than calling
+That injection is the reason `internal/server/forward.go` takes a `dialFunc` rather than calling
 `grpc.Dial` directly: forwarding is exercised without opening sockets, and the
 tests stay fast and deterministic.
 
@@ -72,18 +77,22 @@ Useful helpers in that file:
 | `ctxWithTimeout` | Context helper with `t.Helper()` |
 
 The consensus tests have their own `newTestCluster`, `applyCommand`, and
-`waitForValue` helpers in `consensus/raft_test.go`.
+`waitForValue` helpers in `internal/consensus/raft_test.go`.
 
 ### Adding a unit test
 
-1. Put it next to the code under test (`storage/foo_test.go`, etc.).
-2. Prefer table-driven cases for validation logic.
-3. Use `t.TempDir()` for any data directory so BoltDB files never leak between
+1. Prefer a black-box test under `tests/unit/<package>` when the exported API is
+   enough.
+2. If the test genuinely needs unexported internals, keep it next to the code
+   (`internal/storage/foo_test.go`, etc.) and add it to the white-box table in
+   [tests/README.md](../tests/README.md).
+3. Prefer table-driven cases for validation logic.
+4. Use `t.TempDir()` for any data directory so BoltDB files never leak between
    tests.
-4. If you start a Raft node, always `defer node.Close()` (or use the cluster
+5. If you start a Raft node, always `defer node.Close()` (or use the cluster
    helper). `Close` shuts Raft down **and** releases the BoltDB file lock;
    skipping it makes the next `StartRaft` on the same directory block.
-5. Run with `-race`; the suite is designed to be race-clean.
+6. Run with `-race`; the suite is designed to be race-clean.
 
 ## Integration tests
 

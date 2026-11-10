@@ -1,4 +1,7 @@
-package main
+// Package config parses and validates the runtime configuration for a single
+// storage node. All values come from environment variables so the same binary
+// can run in Docker Compose and in tests without a configuration file.
+package config
 
 import (
 	"fmt"
@@ -25,8 +28,8 @@ type Config struct {
 	Peers map[string]string
 }
 
-// loadConfig reads the node configuration from environment variables.
-func loadConfig() Config {
+// Load reads the node configuration from environment variables.
+func Load() Config {
 	cfg := Config{
 		NodeID:           envOr("NODE_ID", "node1"),
 		GRPCPort:         envOr("PORT", "50051"),

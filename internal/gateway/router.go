@@ -1,4 +1,7 @@
-package main
+// Package gateway maps keys to storage-node addresses with a consistent hash
+// ring. The CLI in cmd/gateway owns argument parsing and gRPC calls; this
+// package owns only placement.
+package gateway
 
 import (
 	"fmt"

@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"distributed-kv-store/storage"
+	"distributed-kv-store/internal/storage"
 
 	"github.com/hashicorp/raft"
 )

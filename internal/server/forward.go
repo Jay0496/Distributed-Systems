@@ -1,9 +1,11 @@
-package main
+package server
 
 import (
 	"context"
 	"fmt"
 	"time"
+
+	"distributed-kv-store/internal/config"
 
 	pb "distributed-kv-store/proto"
 
@@ -24,7 +26,7 @@ const (
 type dialFunc func(ctx context.Context, target string) (*grpc.ClientConn, error)
 
 // newDialFunc returns the production dialer. TLS is used when configured.
-func newDialFunc(cfg Config) dialFunc {
+func newDialFunc(cfg config.Config) dialFunc {
 	return func(ctx context.Context, target string) (*grpc.ClientConn, error) {
 		var opts []grpc.DialOption
 		if cfg.TLSEnabled {
@@ -42,7 +44,7 @@ func newDialFunc(cfg Config) dialFunc {
 }
 
 // getConn returns a cached connection to target, dialing if necessary.
-func (s *server) getConn(ctx context.Context, target string) (*grpc.ClientConn, error) {
+func (s *Server) getConn(ctx context.Context, target string) (*grpc.ClientConn, error) {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
 
@@ -58,7 +60,7 @@ func (s *server) getConn(ctx context.Context, target string) (*grpc.ClientConn, 
 }
 
 // dropConn closes and forgets a cached connection so the next attempt redials.
-func (s *server) dropConn(target string) {
+func (s *Server) dropConn(target string) {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
 
@@ -69,7 +71,7 @@ func (s *server) dropConn(target string) {
 }
 
 // leaderGRPCAddr resolves the current leader's gRPC address via the peer map.
-func (s *server) leaderGRPCAddr() (string, bool) {
+func (s *Server) leaderGRPCAddr() (string, bool) {
 	_, leaderID := s.node.Raft.LeaderWithID()
 	if leaderID == "" {
 		return "", false
@@ -88,7 +90,7 @@ func alreadyForwarded(ctx context.Context) bool {
 }
 
 // forwardPut forwards a write to the leader. It retries once on Unavailable.
-func (s *server) forwardPut(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
+func (s *Server) forwardPut(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
 	if alreadyForwarded(ctx) {
 		return nil, status.Error(codes.FailedPrecondition, "request was forwarded but this node is not the leader")
 	}
@@ -125,7 +127,7 @@ func (s *server) forwardPut(ctx context.Context, req *pb.PutRequest) (*pb.PutRes
 }
 
 // forwardGet forwards a read to the leader. It retries once on Unavailable.
-func (s *server) forwardGet(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
+func (s *Server) forwardGet(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
 	if alreadyForwarded(ctx) {
 		return nil, status.Error(codes.FailedPrecondition, "request was forwarded but this node is not the leader")
 	}

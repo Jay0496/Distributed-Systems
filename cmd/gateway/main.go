@@ -7,6 +7,8 @@ import (
 	"os"
 	"time"
 
+	"distributed-kv-store/internal/gateway"
+
 	pb "distributed-kv-store/proto"
 
 	"google.golang.org/grpc"
@@ -33,12 +35,12 @@ func run(args []string) error {
 		if len(args) != 3 {
 			return errors.New("put requires a key and value")
 		}
-		return executePut(NewRouter(100).GetNode(args[1]), args[1], args[2], "")
+		return executePut(gateway.NewRouter(100).GetNode(args[1]), args[1], args[2], "")
 	case "get":
 		if len(args) != 2 {
 			return errors.New("get requires a key")
 		}
-		return executeGet(NewRouter(100).GetNode(args[1]), args[1])
+		return executeGet(gateway.NewRouter(100).GetNode(args[1]), args[1])
 	case "mode":
 		if len(args) != 2 {
 			return errors.New("mode requires replication or rs32")
@@ -53,7 +55,7 @@ func run(args []string) error {
 }
 
 func usage() string {
-	return "Usage:\n  go run . put <key> <val>\n  go run . get <key>\n  go run . mode <replication|rs32>"
+	return "Usage:\n  go run ./cmd/gateway put <key> <val>\n  go run ./cmd/gateway get <key>\n  go run ./cmd/gateway mode <replication|rs32>"
 }
 
 func executePut(addr, key, value, mode string) error {

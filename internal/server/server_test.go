@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -8,8 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"distributed-kv-store/consensus"
-	"distributed-kv-store/storage"
+	"distributed-kv-store/internal/config"
+	"distributed-kv-store/internal/consensus"
+	"distributed-kv-store/internal/storage"
 
 	pb "distributed-kv-store/proto"
 
@@ -130,13 +131,13 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 
 	// 4. Start the gRPC front ends.
 	for _, tn := range c.nodes {
-		cfg := Config{
+		cfg := config.Config{
 			NodeID:  tn.id,
 			DataDir: t.TempDir(),
 			Peers:   peers,
 		}
 		grpcSrv := grpc.NewServer()
-		pb.RegisterStorageServiceServer(grpcSrv, newServer(cfg, tn.store, tn.node, dial))
+		pb.RegisterStorageServiceServer(grpcSrv, New(cfg, tn.store, tn.node, dial))
 
 		hs := health.NewServer()
 		hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
