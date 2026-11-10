@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -137,7 +137,7 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 			Peers:   peers,
 		}
 		grpcSrv := grpc.NewServer()
-		pb.RegisterStorageServiceServer(grpcSrv, newServer(cfg, tn.store, tn.node, dial))
+		pb.RegisterStorageServiceServer(grpcSrv, New(cfg, tn.store, tn.node, dial))
 
 		hs := health.NewServer()
 		hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)

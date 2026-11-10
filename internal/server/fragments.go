@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -23,7 +23,7 @@ func fragmentKey(key string, index int32, isParity bool) string {
 }
 
 // UploadFragment stores each chunk of a streamed fragment.
-func (s *server) UploadFragment(stream pb.StorageService_UploadFragmentServer) error {
+func (s *Server) UploadFragment(stream pb.StorageService_UploadFragmentServer) error {
 	count := 0
 	for {
 		chunk, err := stream.Recv()
@@ -49,7 +49,7 @@ func (s *server) UploadFragment(stream pb.StorageService_UploadFragmentServer) e
 }
 
 // DownloadFragment streams a stored fragment back to the caller.
-func (s *server) DownloadFragment(req *pb.FragmentRequest, stream pb.StorageService_DownloadFragmentServer) error {
+func (s *Server) DownloadFragment(req *pb.FragmentRequest, stream pb.StorageService_DownloadFragmentServer) error {
 	if req.GetKey() == "" {
 		return status.Error(codes.InvalidArgument, "fragment key is required")
 	}
@@ -73,7 +73,7 @@ func (s *server) DownloadFragment(req *pb.FragmentRequest, stream pb.StorageServ
 
 // Repair is the entry point for the failure-management subsystem. It is a
 // deliberate scaffold: reconstruction and rebalancing land with that subsystem.
-func (s *server) Repair(ctx context.Context, req *pb.RepairRequest) (*pb.RepairResponse, error) {
+func (s *Server) Repair(ctx context.Context, req *pb.RepairRequest) (*pb.RepairResponse, error) {
 	if strings.TrimSpace(req.GetKey()) == "" {
 		return &pb.RepairResponse{Success: false, Message: "key is required"}, nil
 	}

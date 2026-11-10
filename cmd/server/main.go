@@ -1,21 +1,21 @@
+// Command server runs one storage node. It loads configuration, starts the Raft
+// group and the gRPC API, and shuts down cleanly on SIGINT/SIGTERM.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"sort"
-	"strconv"
-	"sync"
 	"syscall"
 	"time"
 
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/consensus"
+	"distributed-kv-store/internal/server"
 	"distributed-kv-store/internal/storage"
 
 	pb "distributed-kv-store/proto"
@@ -27,144 +27,6 @@ import (
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
-
-type server struct {
-	pb.UnimplementedStorageServiceServer
-	store storage.KVStore
-	node  *consensus.Node
-	cfg   config.Config
-	redun RedundancyEngine
-
-	connMu sync.Mutex
-	conns  map[string]*grpc.ClientConn
-	dial   dialFunc
-}
-
-// newServer builds a server with its connection cache and redundancy hook.
-// A nil dial uses the production gRPC dialer.
-func newServer(cfg config.Config, store storage.KVStore, node *consensus.Node, dial dialFunc) *server {
-	if dial == nil {
-		dial = newDialFunc(cfg)
-	}
-	return &server{
-		store: store,
-		node:  node,
-		cfg:   cfg,
-		redun: noopRedundancy{},
-		conns: make(map[string]*grpc.ClientConn),
-		dial:  dial,
-	}
-}
-
-func (s *server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
-	if err := validateMode(req.GetMode()); err != nil {
-		return &pb.PutResponse{Success: false, Message: err.Error()}, nil
-	}
-
-	// Followers transparently forward writes to the current leader.
-	if s.node.Raft.State() != raft.Leader {
-		return s.forwardPut(ctx, req)
-	}
-
-	// Wrap the request in a Raft command.
-	cmd := consensus.Command{
-		Op:    "put",
-		Mode:  req.GetMode(),
-		Key:   req.GetKey(),
-		Value: req.GetValue(),
-	}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return &pb.PutResponse{Success: false, Message: err.Error()}, nil
-	}
-
-	// Replicate the command through Raft and wait for consensus.
-	future := s.node.Raft.Apply(data, 10*time.Second)
-	if err := future.Error(); err != nil {
-		return &pb.PutResponse{Success: false, Message: err.Error()}, nil
-	}
-
-	// Check whether the FSM returned an error while applying.
-	if applyErr := future.Response(); applyErr != nil {
-		return &pb.PutResponse{Success: false, Message: fmt.Sprintf("%v", applyErr)}, nil
-	}
-
-	return &pb.PutResponse{Success: true, Message: "Consensus reached and stored successfully"}, nil
-}
-
-func (s *server) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
-	// Followers transparently forward reads to the current leader.
-	if s.node.Raft.State() != raft.Leader {
-		return s.forwardGet(ctx, req)
-	}
-
-	// Reads go through the Raft log so they observe all previously committed
-	// writes (linearizable reads).
-	cmd := consensus.Command{Op: "get", Key: req.GetKey()}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return &pb.GetResponse{Success: false}, nil
-	}
-
-	future := s.node.Raft.Apply(data, 10*time.Second)
-	if err := future.Error(); err != nil {
-		return &pb.GetResponse{Success: false}, nil
-	}
-
-	result, ok := future.Response().(*consensus.GetResult)
-	if !ok || !result.Found || result.Err != "" {
-		return &pb.GetResponse{Success: false}, nil
-	}
-	return &pb.GetResponse{Success: true, Value: result.Value}, nil
-}
-
-func (s *server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
-	return &pb.HeartbeatResponse{Alive: true}, nil
-}
-
-// Join asks the current leader to add a new voter to the Raft cluster.
-func (s *server) Join(ctx context.Context, req *pb.JoinRequest) (*pb.JoinResponse, error) {
-	if req.GetNodeId() == "" || req.GetRaftAddr() == "" {
-		return &pb.JoinResponse{Success: false, Message: "node_id and raft_addr are required"}, nil
-	}
-
-	if err := s.node.AddVoter(req.GetNodeId(), req.GetRaftAddr()); err != nil {
-		_, leaderID := s.node.Raft.LeaderWithID()
-		return &pb.JoinResponse{
-			Success:  false,
-			Message:  err.Error(),
-			LeaderId: string(leaderID),
-		}, nil
-	}
-
-	return &pb.JoinResponse{
-		Success:  true,
-		Message:  "voter added to cluster",
-		LeaderId: s.cfg.NodeID,
-	}, nil
-}
-
-// NodeStatus reports the local node's Raft state for diagnostics and tests.
-func (s *server) NodeStatus(ctx context.Context, req *pb.NodeStatusRequest) (*pb.NodeStatusResponse, error) {
-	stats := s.node.Raft.Stats()
-	leaderAddr, leaderID := s.node.Raft.LeaderWithID()
-
-	parse := func(key string) uint64 {
-		v, _ := strconv.ParseUint(stats[key], 10, 64)
-		return v
-	}
-
-	return &pb.NodeStatusResponse{
-		NodeId:       s.cfg.NodeID,
-		State:        s.node.Raft.State().String(),
-		LeaderId:     string(leaderID),
-		LeaderAddr:   string(leaderAddr),
-		Term:         parse("term"),
-		CommitIndex:  parse("commit_index"),
-		AppliedIndex: s.node.Raft.AppliedIndex(),
-		LastIndex:    s.node.Raft.LastIndex(),
-	}, nil
-}
 
 func main() {
 	cfg := config.Load()
@@ -225,7 +87,7 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(grpcOpts...)
-	pb.RegisterStorageServiceServer(grpcServer, newServer(cfg, store, node, nil))
+	pb.RegisterStorageServiceServer(grpcServer, server.New(cfg, store, node, nil))
 
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
