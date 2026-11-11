@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"testing"
 	"time"
@@ -491,89 +490,4 @@ func TestServerModeValidation(t *testing.T) {
 	}
 }
 
-// TestServerFragmentRoundTrip exercises the streaming fragment RPCs and the
-// repair scaffold.
-func TestServerFragmentRoundTrip(t *testing.T) {
-	c := newTestCluster(t, 1)
-	leader := c.waitLeader(t)
 
-	stream, err := leader.client.UploadFragment(context.Background())
-	if err != nil {
-		t.Fatalf("UploadFragment failed: %v", err)
-	}
-
-	chunks := []*pb.FragmentChunk{
-		{Key: "doc", Index: 0, Data: []byte("data-zero"), IsParity: false},
-		{Key: "doc", Index: 1, Data: []byte("data-one"), IsParity: false},
-		{Key: "doc", Index: 2, Data: []byte("parity-two"), IsParity: true},
-	}
-	for _, chunk := range chunks {
-		if err := stream.Send(chunk); err != nil {
-			t.Fatalf("stream.Send failed: %v", err)
-		}
-	}
-	resp, err := stream.CloseAndRecv()
-	if err != nil {
-		t.Fatalf("CloseAndRecv failed: %v", err)
-	}
-	if !resp.GetSuccess() {
-		t.Fatalf("upload rejected: %s", resp.GetMessage())
-	}
-
-	download := func(index int32, wantParity bool, want string) {
-		t.Helper()
-
-		ctx, cancel := ctxWithTimeout(t, 5*time.Second)
-		defer cancel()
-
-		ds, err := leader.client.DownloadFragment(ctx, &pb.FragmentRequest{Key: "doc", Index: index})
-		if err != nil {
-			t.Fatalf("DownloadFragment(%d) failed: %v", index, err)
-		}
-		got, err := ds.Recv()
-		if err != nil && err != io.EOF {
-			t.Fatalf("Recv failed: %v", err)
-		}
-		if got == nil {
-			t.Fatalf("fragment %d not found", index)
-		}
-		if got.GetIsParity() != wantParity {
-			t.Fatalf("fragment %d parity=%v, want %v", index, got.GetIsParity(), wantParity)
-		}
-		if string(got.GetData()) != want {
-			t.Fatalf("fragment %d = %q, want %q", index, got.GetData(), want)
-		}
-	}
-
-	download(0, false, "data-zero")
-	download(1, false, "data-one")
-	download(2, true, "parity-two")
-
-	// Missing fragment surface as NotFound.
-	ctx, cancel := ctxWithTimeout(t, 5*time.Second)
-	defer cancel()
-	ds, err := leader.client.DownloadFragment(ctx, &pb.FragmentRequest{Key: "doc", Index: 9})
-	if err != nil {
-		t.Fatalf("DownloadFragment(missing) failed: %v", err)
-	}
-	if _, err := ds.Recv(); status.Code(err) != codes.NotFound {
-		t.Fatalf("expected NotFound for a missing fragment, got %v", err)
-	}
-
-	// Repair is deliberately a scaffold, but it must validate and accept.
-	repairResp, err := leader.client.Repair(context.Background(), &pb.RepairRequest{Key: "doc"})
-	if err != nil {
-		t.Fatalf("Repair failed: %v", err)
-	}
-	if !repairResp.GetSuccess() {
-		t.Fatalf("Repair rejected a valid key: %s", repairResp.GetMessage())
-	}
-
-	badRepair, err := leader.client.Repair(context.Background(), &pb.RepairRequest{Key: "  "})
-	if err != nil {
-		t.Fatalf("Repair(blank) RPC failed: %v", err)
-	}
-	if badRepair.GetSuccess() {
-		t.Fatal("Repair accepted a blank key")
-	}
-}

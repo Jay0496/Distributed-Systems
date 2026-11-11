@@ -31,23 +31,26 @@ type Server struct {
 	node  *consensus.Node
 	cfg   config.Config
 
-	connMu sync.Mutex
-	conns  map[string]*grpc.ClientConn
-	dial   dialFunc
+	connMu  sync.Mutex
+	conns   map[string]*grpc.ClientConn
+	dial    dialFunc
+	staging *fragmentStaging
 }
 
 // New builds a Server with its connection cache and dialer.
 // A nil dial uses the production gRPC dialer.
 func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dialFunc) *Server {
+	cfg = cfg.WithDefaults()
 	if dial == nil {
 		dial = newDialFunc(cfg)
 	}
 	return &Server{
-		store: store,
-		node:  node,
-		cfg:   cfg,
-		conns: make(map[string]*grpc.ClientConn),
-		dial:  dial,
+		store:   store,
+		node:    node,
+		cfg:     cfg,
+		conns:   make(map[string]*grpc.ClientConn),
+		dial:    dial,
+		staging: newFragmentStaging(),
 	}
 }
 
