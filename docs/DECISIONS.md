@@ -494,12 +494,13 @@ is committed with `Degraded=true`.
 
 Cleanup depends on what the commit outcome proves:
 
-- A definite rejection (`Result.Err`) proves the entry was not applied. The new
-  stripe's successfully uploaded fragments are deleted.
-- An ambiguous failure (timeout, leadership loss, connection loss) may have
-  committed. Fragments are retained; deleting them could destroy the live stripe
-  the caller cannot see yet. The task 09 orphan sweep removes only fragments that
-  no committed metadata references after a grace period.
+- A definite rejection (`conflict` or `invalid`) proves the entry was not
+  applied. The new stripe's successfully uploaded fragments are deleted.
+- An ambiguous failure (timeout, leadership loss, connection loss, or an internal
+  apply error) may have committed. Fragments are retained; deleting them could
+  destroy the live stripe the caller cannot see yet. The task 09 orphan sweep
+  removes only fragments that no committed metadata references after a grace
+  period.
 - A successful overwrite garbage-collects the previous stripe's fragments
   asynchronously, after the new metadata commits, on the owners recorded in the
   old metadata. The apply has already removed the old stripe and placement rows.

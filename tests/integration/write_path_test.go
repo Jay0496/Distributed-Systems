@@ -148,6 +148,20 @@ func TestWriteRS32PlacesFiveShards(t *testing.T) {
 	}
 }
 
+func TestWriteEmptyValue(t *testing.T) {
+	c := support.StartCluster(t, 5)
+
+	resp := c.Put(t, &pb.PutRequest{Key: "empty", Value: nil, Mode: "replication"})
+	if !resp.GetSuccess() {
+		t.Fatalf("empty Put rejected: %s", resp.GetMessage())
+	}
+	meta := waitWriteMeta(t, c, "empty", 1)
+	if meta.Size != 0 || meta.Checksum != redundancy.Checksum(nil) {
+		t.Fatalf("empty metadata = %+v", meta)
+	}
+	waitFragmentTotal(t, c, meta.StripeID, redundancy.TotalShards)
+}
+
 func TestWriteReplicationPlacesFiveCopies(t *testing.T) {
 	c := support.StartCluster(t, 5)
 	value := bytes.Repeat([]byte("replication-copy-"), 512)

@@ -79,7 +79,7 @@ func TestValidatePut(t *testing.T) {
 		{name: "empty key", key: "", value: []byte("v"), wantErr: true},
 		{name: "long key", key: strings.Repeat("k", 513), value: []byte("v"), wantErr: true},
 		{name: "control key", key: "bad\x00key", value: []byte("v"), wantErr: true},
-		{name: "empty value", key: "k", value: nil, wantErr: true},
+		{name: "empty value is valid", key: "k", value: nil},
 		{name: "oversized value", key: "k", value: make([]byte, 17), wantErr: true},
 		{name: "invalid mode", key: "k", value: []byte("v"), mode: "triple", wantErr: true},
 		{name: "empty mode resolves later", key: "k", value: []byte("v"), mode: ""},

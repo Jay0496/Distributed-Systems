@@ -38,12 +38,9 @@ func validateKey(key string) error {
 	return nil
 }
 
-// validateValueSize rejects an empty or oversized value. The configured limit
-// is MAX_VALUE_SIZE (default 8 MiB).
+// validateValueSize rejects a value larger than the configured MAX_VALUE_SIZE
+// (default 8 MiB). Empty values are valid and encode to an empty stripe.
 func validateValueSize(value []byte, maxValueSize int) error {
-	if len(value) == 0 {
-		return fmt.Errorf("value must not be empty")
-	}
 	if maxValueSize > 0 && len(value) > maxValueSize {
 		return fmt.Errorf("value is %d bytes, limit is MAX_VALUE_SIZE %d", len(value), maxValueSize)
 	}

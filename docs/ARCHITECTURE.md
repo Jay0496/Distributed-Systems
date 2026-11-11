@@ -274,10 +274,11 @@ sequenceDiagram
    `success=true`.
 9. The `put_meta` command contains no payload: key, stripe ID, mode, original
    size, original-value SHA-256, version, degraded flag, and five placements. A
-   definite rejection (`Result.Err`) proves the entry was not applied, so the new
-   stripe's fragments are deleted. An ambiguous failure (timeout, leadership
-   loss, connection loss) may have committed; the fragments are deliberately
-   retained for the task 09 orphan sweep.
+   definite rejection (`conflict` or `invalid`) proves the entry was not applied,
+   so the new stripe's fragments are deleted. An ambiguous failure (timeout,
+   leadership loss, connection loss, or an internal apply error) may have
+   committed; the fragments are deliberately retained for the task 09 orphan
+   sweep.
 10. After a successful overwrite, the leader asynchronously deletes the previous
     stripe's fragments on their owners. The `put_meta` apply already removed the
     old stripe and placement metadata rows on every node, so garbage collection
@@ -296,8 +297,8 @@ the version and uploading under a new stripe ID. A request that supplied
 | Five shards/copies stored | `success=true`, `degraded=false`, `shards_stored=5` |
 | Three or four stored | `success=true`, `degraded=true`; metadata records the intended five placements; repair is required |
 | Fewer than three stored | `success=false`, no metadata, successful uploads are deleted |
-| Metadata commit definitely rejected | `success=false`, new stripe fragments deleted |
-| Metadata commit outcome ambiguous | `success=false`, fragments retained for the orphan sweep |
+| Metadata commit definitely rejected (`conflict`, `invalid`) | `success=false`, new stripe fragments deleted |
+| Metadata commit outcome ambiguous (`internal`, timeout, leadership loss) | `success=false`, fragments retained for the orphan sweep |
 | `expected_version` mismatch | `success=false`, no fragments written |
 | Raft apply or request deadline | `success=false`; the caller can retry with the same or a higher expected version |
 

@@ -289,12 +289,17 @@ func (s *Server) write(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse
 		}
 
 		if result.Err != "" {
-			// A typed rejection proves the entry was not applied. Remove the
-			// fragments this attempt stored so a failed write leaves no stripe
-			// behind.
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), gcTimeout)
-			s.deleteStripeFragments(cleanupCtx, intent.stripeID, stored)
-			cancel()
+			// Only conflict and invalid prove the entry was not applied. An
+			// internal failure may have happened after the Raft entry committed,
+			// so it is treated as ambiguous and its fragments are retained.
+			definite := result.Err == consensus.ResultErrConflict || result.Err == consensus.ResultErrInvalid
+			if definite {
+				// Remove the fragments this attempt stored so a failed write
+				// leaves no stripe behind.
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), gcTimeout)
+				s.deleteStripeFragments(cleanupCtx, intent.stripeID, stored)
+				cancel()
+			}
 
 			if result.Err == consensus.ResultErrConflict {
 				if req.GetExpectedVersion() != 0 {
@@ -304,6 +309,9 @@ func (s *Server) write(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse
 					continue
 				}
 				return writeFailed("metadata version conflict after %d attempts", maxWriteAttempts), nil
+			}
+			if !definite {
+				return writeFailed("metadata commit outcome is unknown: %s", result.Err), nil
 			}
 			return writeFailed("metadata commit rejected: %s", result.Err), nil
 		}

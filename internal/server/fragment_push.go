@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 
@@ -129,7 +130,10 @@ func (s *Server) pushShards(ctx context.Context, stripeID string, shards []redun
 	for outcome := range results {
 		if outcome.err == nil {
 			stored = append(stored, outcome.placement)
+			continue
 		}
+		log.Printf("write: shard upload failed stripe=%s shard=%d owner=%s error=%v",
+			stripeID, outcome.placement.ShardIndex, outcome.placement.NodeID, outcome.err)
 	}
 	sort.Slice(stored, func(i, j int) bool {
 		return stored[i].ShardIndex < stored[j].ShardIndex
@@ -180,11 +184,9 @@ func (s *Server) pushShard(ctx context.Context, stripeID string, shard redundanc
 	}
 
 	total := int64(len(shard.Data))
-	chunkSize := s.cfg.UploadChunkSize
-	if chunkSize <= 0 {
-		chunkSize = len(shard.Data)
-	}
-	if chunkSize <= 0 {
+	if len(shard.Data) == 0 {
+		// A replication copy of an empty value is a single zero-length chunk
+		// carrying the SHA-256 of the empty string.
 		if err := stream.Send(&pb.FragmentChunk{
 			StripeId:   stripeID,
 			ShardIndex: int32(shard.Index),
@@ -194,9 +196,14 @@ func (s *Server) pushShard(ctx context.Context, stripeID string, shard redundanc
 			TotalSize:  0,
 			Last:       true,
 		}); err != nil {
+			_ = stream.CloseSend()
 			return fmt.Errorf("send empty shard %d: %w", shard.Index, err)
 		}
 	} else {
+		chunkSize := s.cfg.UploadChunkSize
+		if chunkSize <= 0 {
+			chunkSize = len(shard.Data)
+		}
 		for offset := 0; offset < len(shard.Data); offset += chunkSize {
 			end := offset + chunkSize
 			if end > len(shard.Data) {
