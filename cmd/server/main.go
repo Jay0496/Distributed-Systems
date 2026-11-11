@@ -33,9 +33,19 @@ func main() {
 
 	fmt.Printf("Starting %s (gRPC on %s, Raft on %s, data dir %s)...\n", cfg.NodeID, cfg.GRPCPort, cfg.RaftPort, cfg.DataDir)
 
-	// For now the consensus layer uses the MockStore. Once the persistence
-	// team lands the SQLite implementation, this can be switched by env var.
-	store := storage.NewMockStore()
+	// Open the SQLite store before Raft so a broken database fails fast.
+	store, err := storage.Open(storage.StoreConfig{
+		Path:        cfg.StorePath,
+		BusyTimeout: cfg.StoreBusyTimeout,
+	})
+	if err != nil {
+		log.Fatalf("Failed to open store at %s: %v", cfg.StorePath, err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Printf("Failed to close store: %v", err)
+		}
+	}()
 
 	// Resolve the advertised Raft address. In Docker Compose this resolves
 	// to the container name (e.g. node1:60051).
@@ -107,12 +117,17 @@ func main() {
 		grpcServer.GracefulStop()
 		_ = node.Close()
 		_ = transport.Close()
+		_ = store.Close()
 	}()
 
 	fmt.Printf("gRPC server listening on port %s\n", cfg.GRPCPort)
 	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("Failed to serve: %v", err)
+		log.Printf("gRPC server stopped: %v", err)
 	}
+
+	// If Serve returns without a signal, still release Raft and BoltDB.
+	_ = node.Close()
+	_ = transport.Close()
 }
 
 // joinCluster asks the node configured in JOIN_ADDR to add this node as a

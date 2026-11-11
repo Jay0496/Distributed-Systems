@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"distributed-kv-store/internal/storage"
-
 	"github.com/hashicorp/raft"
 )
 
@@ -15,7 +13,7 @@ import (
 type testCluster struct {
 	ids        []string
 	nodes      []*Node
-	stores     []*storage.MockStore
+	stores     []*testStore
 	transports []*raft.InmemTransport
 	addrs      []raft.ServerAddress
 	dataDirs   []string
@@ -27,7 +25,7 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 	c := &testCluster{
 		ids:        make([]string, n),
 		nodes:      make([]*Node, n),
-		stores:     make([]*storage.MockStore, n),
+		stores:     make([]*testStore, n),
 		transports: make([]*raft.InmemTransport, n),
 		addrs:      make([]raft.ServerAddress, n),
 		dataDirs:   make([]string, n),
@@ -55,7 +53,7 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 	bootstrap := raft.Configuration{Servers: servers}
 
 	for i := 0; i < n; i++ {
-		c.stores[i] = storage.NewMockStore()
+		c.stores[i] = newTestStore()
 		c.dataDirs[i] = t.TempDir()
 
 		cfg := raft.Configuration{}
@@ -123,7 +121,11 @@ func applyCommand(t *testing.T, node *Node, cmd Command) interface{} {
 	return future.Response()
 }
 
-func waitForValue(t *testing.T, store *storage.MockStore, key, want string, timeout time.Duration) {
+type getter interface {
+	Get(key string) ([]byte, error)
+}
+
+func waitForValue(t *testing.T, store getter, key, want string, timeout time.Duration) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -137,10 +139,10 @@ func waitForValue(t *testing.T, store *storage.MockStore, key, want string, time
 	t.Fatalf("timed out waiting for %q=%q", key, want)
 }
 
-// TestRaftClusterMockStore spins up a 3-node in-memory Raft cluster, waits
-// for a leader election, applies a Put command, and verifies that the data
-// is replicated to every node's MockStore.
-func TestRaftClusterMockStore(t *testing.T) {
+// TestRaftClusterReplication spins up a 3-node in-memory Raft cluster, waits
+// for a leader election, applies a Put command, and verifies that the data is
+// replicated to every node's in-memory store.
+func TestRaftClusterReplication(t *testing.T) {
 	c := newTestCluster(t, 3)
 	leaderIdx := c.waitLeader(t, -1)
 	t.Logf("leader elected: %s", c.ids[leaderIdx])
@@ -214,7 +216,7 @@ func TestRaftPersistenceCatchUp(t *testing.T) {
 		trans.Connect(c.addrs[j], c.transports[j])
 	}
 
-	c.stores[stopped] = storage.NewMockStore()
+	c.stores[stopped] = newTestStore()
 	node, err := StartRaft(c.ids[stopped], c.stores[stopped], trans, c.dataDirs[stopped], raft.Configuration{})
 	if err != nil {
 		t.Fatalf("restart %s: %v", c.ids[stopped], err)
@@ -233,7 +235,7 @@ func TestRaftSnapshotRestore(t *testing.T) {
 	dir := t.TempDir()
 	addr, transport := raft.NewInmemTransport("node1")
 
-	store := storage.NewMockStore()
+	store := newTestStore()
 	conf := raft.Configuration{Servers: []raft.Server{{ID: "node1", Address: addr}}}
 	node, err := StartRaft("node1", store, transport, dir, conf)
 	if err != nil {
@@ -261,7 +263,7 @@ func TestRaftSnapshotRestore(t *testing.T) {
 
 	// Restart with a fresh store, same data directory, no bootstrap.
 	_, restartedTransport := raft.NewInmemTransport(addr)
-	restartedStore := storage.NewMockStore()
+	restartedStore := newTestStore()
 	restarted, err := StartRaft("node1", restartedStore, restartedTransport, dir, raft.Configuration{})
 	if err != nil {
 		t.Fatalf("restart node: %v", err)

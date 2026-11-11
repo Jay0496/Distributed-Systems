@@ -1,7 +1,9 @@
 package config_test
 
 import (
+	"path/filepath"
 	"testing"
+	"time"
 
 	"distributed-kv-store/internal/config"
 )
@@ -16,6 +18,8 @@ func clearConfigEnv(t *testing.T) {
 		"PORT",
 		"RAFT_PORT",
 		"DATA_DIR",
+		"STORE_PATH",
+		"STORE_BUSY_TIMEOUT",
 		"BOOTSTRAP",
 		"JOIN_ADDR",
 		"TLS_ENABLED",
@@ -46,6 +50,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DataDir != "/data" {
 		t.Errorf("DataDir = %q, want /data", cfg.DataDir)
 	}
+	if want := filepath.Join("/data", "node.db"); cfg.StorePath != want {
+		t.Errorf("StorePath = %q, want %q", cfg.StorePath, want)
+	}
+	if cfg.StoreBusyTimeout != 5*time.Second {
+		t.Errorf("StoreBusyTimeout = %v, want 5s", cfg.StoreBusyTimeout)
+	}
 	if cfg.Bootstrap {
 		t.Error("Bootstrap = true, want false")
 	}
@@ -67,6 +77,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("PORT", "50054")
 	t.Setenv("RAFT_PORT", "60054")
 	t.Setenv("DATA_DIR", "/tmp/node4")
+	t.Setenv("STORE_PATH", "/tmp/node4/custom.db")
+	t.Setenv("STORE_BUSY_TIMEOUT", "2s")
 	t.Setenv("BOOTSTRAP", "true")
 	t.Setenv("JOIN_ADDR", "node1:50051")
 	t.Setenv("TLS_ENABLED", "true")
@@ -87,6 +99,12 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 	if cfg.DataDir != "/tmp/node4" {
 		t.Errorf("DataDir = %q, want /tmp/node4", cfg.DataDir)
+	}
+	if cfg.StorePath != "/tmp/node4/custom.db" {
+		t.Errorf("StorePath = %q, want /tmp/node4/custom.db", cfg.StorePath)
+	}
+	if cfg.StoreBusyTimeout != 2*time.Second {
+		t.Errorf("StoreBusyTimeout = %v, want 2s", cfg.StoreBusyTimeout)
 	}
 	if !cfg.Bootstrap {
 		t.Error("Bootstrap = false, want true")
@@ -158,5 +176,17 @@ func TestLoadTrimsWhitespace(t *testing.T) {
 
 	if got := cfg.Peers["node1"]; got != "node1:50051" {
 		t.Errorf("Peers[node1] = %q, want node1:50051", got)
+	}
+}
+
+func TestLoadRejectsInvalidBusyTimeout(t *testing.T) {
+	clearConfigEnv(t)
+
+	t.Setenv("STORE_BUSY_TIMEOUT", "not-a-duration")
+
+	cfg := config.Load()
+
+	if cfg.StoreBusyTimeout != 5*time.Second {
+		t.Errorf("StoreBusyTimeout = %v, want fallback 5s", cfg.StoreBusyTimeout)
 	}
 }

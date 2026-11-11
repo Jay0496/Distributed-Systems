@@ -27,7 +27,7 @@ import (
 // for forwarding.
 type Server struct {
 	pb.UnimplementedStorageServiceServer
-	store storage.KVStore
+	store storage.Store
 	node  *consensus.Node
 	cfg   config.Config
 	redun redundancy.RedundancyEngine
@@ -39,7 +39,7 @@ type Server struct {
 
 // New builds a Server with its connection cache and redundancy hook.
 // A nil dial uses the production gRPC dialer.
-func New(cfg config.Config, store storage.KVStore, node *consensus.Node, dial dialFunc) *Server {
+func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dialFunc) *Server {
 	if dial == nil {
 		dial = newDialFunc(cfg)
 	}

@@ -33,7 +33,7 @@ func applyJSON(t *testing.T, fsm *FSM, cmd Command) interface{} {
 }
 
 func TestFSMPutAndGet(t *testing.T) {
-	store := storage.NewMockStore()
+	store := newTestStore()
 	fsm := NewFSM(store)
 
 	if ret := applyJSON(t, fsm, Command{Op: "put", Mode: "rs32", Key: "k", Value: []byte("v")}); ret != nil {
@@ -51,7 +51,7 @@ func TestFSMPutAndGet(t *testing.T) {
 }
 
 func TestFSMGetMissingKey(t *testing.T) {
-	fsm := NewFSM(storage.NewMockStore())
+	fsm := NewFSM(newTestStore())
 
 	ret := applyJSON(t, fsm, Command{Op: "get", Key: "absent"})
 	result, ok := ret.(*GetResult)
@@ -64,7 +64,7 @@ func TestFSMGetMissingKey(t *testing.T) {
 }
 
 func TestFSMBadJSON(t *testing.T) {
-	fsm := NewFSM(storage.NewMockStore())
+	fsm := NewFSM(newTestStore())
 
 	ret := fsm.Apply(&raft.Log{Data: []byte("{not-json")})
 	if _, ok := ret.(error); !ok {
@@ -73,7 +73,7 @@ func TestFSMBadJSON(t *testing.T) {
 }
 
 func TestFSMUnknownOp(t *testing.T) {
-	fsm := NewFSM(storage.NewMockStore())
+	fsm := NewFSM(newTestStore())
 
 	if ret := applyJSON(t, fsm, Command{Op: "delete", Key: "k"}); ret != nil {
 		t.Fatalf("unknown op returned %v, want nil", ret)
@@ -81,7 +81,7 @@ func TestFSMUnknownOp(t *testing.T) {
 }
 
 func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
-	store := storage.NewMockStore()
+	store := newTestStore()
 	fsm := NewFSM(store)
 
 	applyJSON(t, fsm, Command{Op: "put", Key: "a", Value: []byte("1")})
@@ -103,7 +103,7 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 		t.Fatal("snapshot sink was canceled")
 	}
 
-	restoredStore := storage.NewMockStore()
+	restoredStore := newTestStore()
 	restoredFSM := NewFSM(restoredStore)
 	if err := restoredFSM.Restore(io.NopCloser(bytes.NewReader(sink.buf.Bytes()))); err != nil {
 		t.Fatalf("Restore failed: %v", err)
@@ -121,7 +121,8 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 }
 
 func TestFSMSnapshotWithNonSnapshotter(t *testing.T) {
-	// A store that only implements KVStore must still produce a valid snapshot.
+	// A store that only implements the legacy KV surface must still produce a
+	// valid snapshot.
 	fsm := NewFSM(storeWithoutSnapshot{})
 
 	snapshot, err := fsm.Snapshot()
@@ -137,7 +138,9 @@ func TestFSMSnapshotWithNonSnapshotter(t *testing.T) {
 	}
 }
 
-type storeWithoutSnapshot struct{}
+type storeWithoutSnapshot struct {
+	storage.Store
+}
 
 func (storeWithoutSnapshot) Put(string, []byte, bool) error { return nil }
 func (storeWithoutSnapshot) Get(string) ([]byte, error)     { return nil, nil }
