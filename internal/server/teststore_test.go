@@ -18,12 +18,17 @@ type testStore struct {
 	mu        sync.RWMutex
 	data      map[string][]byte
 	fragments map[string]map[int]storage.Fragment
+	metas     map[string]storage.KeyMeta
+	applied   uint64
+	config    storage.ClusterConfig
+	hasConfig bool
 }
 
 func newTestStore() *testStore {
 	return &testStore{
 		data:      make(map[string][]byte),
 		fragments: make(map[string]map[int]storage.Fragment),
+		metas:     make(map[string]storage.KeyMeta),
 	}
 }
 
@@ -144,3 +149,117 @@ func (s *testStore) ListFragments(stripeID string) ([]storage.FragmentRef, error
 }
 
 func (s *testStore) Close() error { return nil }
+
+// LastAppliedIndex reports the highest metadata index applied by the test FSM.
+func (s *testStore) LastAppliedIndex() (uint64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.applied, nil
+}
+
+// ApplyPutMeta mirrors the SQLite version-conflict and replay behavior closely
+// enough for server component tests.
+func (s *testStore) ApplyPutMeta(raftIndex uint64, meta storage.KeyMeta) (storage.KeyMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if raftIndex != 0 && raftIndex <= s.applied {
+		return storage.KeyMeta{}, nil
+	}
+
+	old, exists := s.metas[meta.Key]
+	if exists {
+		switch {
+		case meta.Version < old.Version:
+			return storage.KeyMeta{}, storage.ErrConflict
+		case meta.Version == old.Version:
+			if meta.StripeID != old.StripeID || meta.Checksum != old.Checksum || meta.Size != old.Size {
+				return storage.KeyMeta{}, storage.ErrConflict
+			}
+			s.applied = raftIndex
+			return old, nil
+		}
+	}
+
+	meta.Placement = append([]storage.ShardPlacement(nil), meta.Placement...)
+	s.metas[meta.Key] = meta
+	s.applied = raftIndex
+	return old, nil
+}
+
+// ApplyMetaStatus updates only the degraded flag when stripe and version match.
+func (s *testStore) ApplyMetaStatus(raftIndex uint64, key, stripeID string, version int64, degraded bool) (storage.KeyMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if raftIndex != 0 && raftIndex <= s.applied {
+		return storage.KeyMeta{}, nil
+	}
+	current, ok := s.metas[key]
+	if !ok {
+		return storage.KeyMeta{}, storage.ErrNotFound
+	}
+	if current.StripeID != stripeID || current.Version != version {
+		return storage.KeyMeta{}, storage.ErrConflict
+	}
+	current.Degraded = degraded
+	s.metas[key] = current
+	s.applied = raftIndex
+	return current, nil
+}
+
+// ApplyDeleteMeta removes a key when the expected version matches.
+func (s *testStore) ApplyDeleteMeta(raftIndex uint64, key string, expectedVersion int64) (storage.KeyMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if raftIndex != 0 && raftIndex <= s.applied {
+		return storage.KeyMeta{}, nil
+	}
+	old, ok := s.metas[key]
+	if !ok {
+		s.applied = raftIndex
+		return storage.KeyMeta{}, nil
+	}
+	if expectedVersion != 0 && expectedVersion != old.Version {
+		return storage.KeyMeta{}, storage.ErrConflict
+	}
+	delete(s.metas, key)
+	s.applied = raftIndex
+	return old, nil
+}
+
+// GetKey returns the committed metadata for key.
+func (s *testStore) GetKey(key string) (storage.KeyMeta, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	meta, ok := s.metas[key]
+	if !ok {
+		return storage.KeyMeta{}, fmt.Errorf("%w: key %q", storage.ErrNotFound, key)
+	}
+	meta.Placement = append([]storage.ShardPlacement(nil), meta.Placement...)
+	return meta, nil
+}
+
+// ApplySetConfig stores the singleton cluster configuration.
+func (s *testStore) ApplySetConfig(raftIndex uint64, cfg storage.ClusterConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if raftIndex != 0 && raftIndex <= s.applied {
+		return nil
+	}
+	s.config = cfg
+	s.hasConfig = true
+	s.applied = raftIndex
+	return nil
+}
+
+// GetConfig returns the singleton cluster configuration.
+func (s *testStore) GetConfig() (storage.ClusterConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.hasConfig {
+		return storage.ClusterConfig{}, fmt.Errorf("%w: cluster config", storage.ErrNotFound)
+	}
+	return s.config, nil
+}

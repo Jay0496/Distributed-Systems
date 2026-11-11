@@ -32,6 +32,10 @@ type Server struct {
 	conns   map[string]*grpc.ClientConn
 	dial    dialFunc
 	staging *fragmentStaging
+
+	// apply is the Raft Apply seam used by the write coordinator. Tests
+	// replace it to force definite and ambiguous commit outcomes.
+	apply applyFunc
 }
 
 // New builds a Server with its connection cache and dialer.
@@ -41,7 +45,7 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 	if dial == nil {
 		dial = newDialFunc(cfg)
 	}
-	return &Server{
+	srv := &Server{
 		store:   store,
 		node:    node,
 		cfg:     cfg,
@@ -49,6 +53,10 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 		dial:    dial,
 		staging: newFragmentStaging(),
 	}
+	// The method value is bound after construction so Server can own the
+	// default apply implementation without a package-level helper.
+	srv.apply = srv.applyRaft
+	return srv
 }
 
 // Put validates the redundancy mode, forwards to the leader when necessary, and

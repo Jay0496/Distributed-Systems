@@ -23,6 +23,15 @@ const (
 	DefaultFragmentTimeout = 10 * time.Second
 )
 
+// Write path defaults. MAX_VALUE_SIZE bounds the original client value,
+// WRITE_TIMEOUT bounds one whole Put (metadata reads and the Raft commit), and
+// SHARD_UPLOAD_TIMEOUT bounds one owner's fragment upload attempt.
+const (
+	DefaultMaxValueSize       = 8 << 20
+	DefaultWriteTimeout       = 15 * time.Second
+	DefaultShardUploadTimeout = 5 * time.Second
+)
+
 // Config holds the runtime configuration for a single storage node.
 type Config struct {
 	NodeID     string
@@ -51,6 +60,14 @@ type Config struct {
 	// FragmentTimeout bounds one upload or download operation (default 10s).
 	FragmentTimeout time.Duration
 
+	// MaxValueSize bounds the original value in a Put (default 8 MiB).
+	MaxValueSize int
+	// WriteTimeout bounds one whole write, including the Raft metadata commit
+	// (default 15s).
+	WriteTimeout time.Duration
+	// ShardUploadTimeout bounds one shard upload to one owner (default 5s).
+	ShardUploadTimeout time.Duration
+
 	// BootstrapServers maps Raft server ID -> Raft address.
 	BootstrapServers map[string]string
 	// Peers maps Raft server ID -> gRPC address.
@@ -62,24 +79,27 @@ func Load() Config {
 	dataDir := envOr("DATA_DIR", "/data")
 
 	cfg := Config{
-		NodeID:           envOr("NODE_ID", "node1"),
-		GRPCPort:         envOr("PORT", "50051"),
-		RaftPort:         envOr("RAFT_PORT", "60051"),
-		DataDir:          dataDir,
-		StorePath:        envOr("STORE_PATH", filepath.Join(dataDir, "node.db")),
-		StoreBusyTimeout: durationOr("STORE_BUSY_TIMEOUT", 5*time.Second),
-		MaxFragmentSize:  intOr("MAX_FRAGMENT_SIZE", DefaultMaxFragmentSize),
-		MaxMessageSize:   intOr("MAX_MESSAGE_SIZE", DefaultMaxMessageSize),
-		UploadChunkSize:  intOr("UPLOAD_CHUNK_SIZE", DefaultUploadChunkSize),
-		FragmentTimeout:  durationOr("FRAGMENT_TIMEOUT", DefaultFragmentTimeout),
-		Bootstrap:        os.Getenv("BOOTSTRAP") == "true",
-		JoinAddr:         os.Getenv("JOIN_ADDR"),
-		TLSEnabled:       os.Getenv("TLS_ENABLED") == "true",
-		TLSCert:          os.Getenv("TLS_CERT_FILE"),
-		TLSKey:           os.Getenv("TLS_KEY_FILE"),
-		TLSCA:            os.Getenv("TLS_CA_FILE"),
-		BootstrapServers: parsePeerMap(os.Getenv("BOOTSTRAP_SERVERS")),
-		Peers:            parsePeerMap(os.Getenv("PEERS")),
+		NodeID:             envOr("NODE_ID", "node1"),
+		GRPCPort:           envOr("PORT", "50051"),
+		RaftPort:           envOr("RAFT_PORT", "60051"),
+		DataDir:            dataDir,
+		StorePath:          envOr("STORE_PATH", filepath.Join(dataDir, "node.db")),
+		StoreBusyTimeout:   durationOr("STORE_BUSY_TIMEOUT", 5*time.Second),
+		MaxFragmentSize:    intOr("MAX_FRAGMENT_SIZE", DefaultMaxFragmentSize),
+		MaxMessageSize:     intOr("MAX_MESSAGE_SIZE", DefaultMaxMessageSize),
+		UploadChunkSize:    intOr("UPLOAD_CHUNK_SIZE", DefaultUploadChunkSize),
+		FragmentTimeout:    durationOr("FRAGMENT_TIMEOUT", DefaultFragmentTimeout),
+		MaxValueSize:       intOr("MAX_VALUE_SIZE", DefaultMaxValueSize),
+		WriteTimeout:       durationOr("WRITE_TIMEOUT", DefaultWriteTimeout),
+		ShardUploadTimeout: durationOr("SHARD_UPLOAD_TIMEOUT", DefaultShardUploadTimeout),
+		Bootstrap:          os.Getenv("BOOTSTRAP") == "true",
+		JoinAddr:           os.Getenv("JOIN_ADDR"),
+		TLSEnabled:         os.Getenv("TLS_ENABLED") == "true",
+		TLSCert:            os.Getenv("TLS_CERT_FILE"),
+		TLSKey:             os.Getenv("TLS_KEY_FILE"),
+		TLSCA:              os.Getenv("TLS_CA_FILE"),
+		BootstrapServers:   parsePeerMap(os.Getenv("BOOTSTRAP_SERVERS")),
+		Peers:              parsePeerMap(os.Getenv("PEERS")),
 	}
 	return cfg
 }
@@ -99,6 +119,15 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.FragmentTimeout <= 0 {
 		c.FragmentTimeout = DefaultFragmentTimeout
+	}
+	if c.MaxValueSize <= 0 {
+		c.MaxValueSize = DefaultMaxValueSize
+	}
+	if c.WriteTimeout <= 0 {
+		c.WriteTimeout = DefaultWriteTimeout
+	}
+	if c.ShardUploadTimeout <= 0 {
+		c.ShardUploadTimeout = DefaultShardUploadTimeout
 	}
 	return c
 }

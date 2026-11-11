@@ -24,6 +24,9 @@ func clearConfigEnv(t *testing.T) {
 		"MAX_MESSAGE_SIZE",
 		"UPLOAD_CHUNK_SIZE",
 		"FRAGMENT_TIMEOUT",
+		"MAX_VALUE_SIZE",
+		"WRITE_TIMEOUT",
+		"SHARD_UPLOAD_TIMEOUT",
 		"BOOTSTRAP",
 		"JOIN_ADDR",
 		"TLS_ENABLED",
@@ -72,6 +75,15 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.FragmentTimeout != config.DefaultFragmentTimeout {
 		t.Errorf("FragmentTimeout = %v, want %v", cfg.FragmentTimeout, config.DefaultFragmentTimeout)
 	}
+	if cfg.MaxValueSize != config.DefaultMaxValueSize {
+		t.Errorf("MaxValueSize = %d, want %d", cfg.MaxValueSize, config.DefaultMaxValueSize)
+	}
+	if cfg.WriteTimeout != config.DefaultWriteTimeout {
+		t.Errorf("WriteTimeout = %v, want %v", cfg.WriteTimeout, config.DefaultWriteTimeout)
+	}
+	if cfg.ShardUploadTimeout != config.DefaultShardUploadTimeout {
+		t.Errorf("ShardUploadTimeout = %v, want %v", cfg.ShardUploadTimeout, config.DefaultShardUploadTimeout)
+	}
 	if cfg.Bootstrap {
 		t.Error("Bootstrap = true, want false")
 	}
@@ -99,6 +111,9 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("MAX_MESSAGE_SIZE", "524288")
 	t.Setenv("UPLOAD_CHUNK_SIZE", "65536")
 	t.Setenv("FRAGMENT_TIMEOUT", "3s")
+	t.Setenv("MAX_VALUE_SIZE", "4194304")
+	t.Setenv("WRITE_TIMEOUT", "20s")
+	t.Setenv("SHARD_UPLOAD_TIMEOUT", "2s")
 	t.Setenv("BOOTSTRAP", "true")
 	t.Setenv("JOIN_ADDR", "node1:50051")
 	t.Setenv("TLS_ENABLED", "true")
@@ -137,6 +152,15 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 	if cfg.FragmentTimeout != 3*time.Second {
 		t.Errorf("FragmentTimeout = %v, want 3s", cfg.FragmentTimeout)
+	}
+	if cfg.MaxValueSize != 4194304 {
+		t.Errorf("MaxValueSize = %d, want 4194304", cfg.MaxValueSize)
+	}
+	if cfg.WriteTimeout != 20*time.Second {
+		t.Errorf("WriteTimeout = %v, want 20s", cfg.WriteTimeout)
+	}
+	if cfg.ShardUploadTimeout != 2*time.Second {
+		t.Errorf("ShardUploadTimeout = %v, want 2s", cfg.ShardUploadTimeout)
 	}
 	if !cfg.Bootstrap {
 		t.Error("Bootstrap = false, want true")
@@ -230,6 +254,9 @@ func TestLoadRejectsInvalidFragmentLimits(t *testing.T) {
 	t.Setenv("MAX_MESSAGE_SIZE", "not-a-number")
 	t.Setenv("UPLOAD_CHUNK_SIZE", "0")
 	t.Setenv("FRAGMENT_TIMEOUT", "-2s")
+	t.Setenv("MAX_VALUE_SIZE", "0")
+	t.Setenv("WRITE_TIMEOUT", "not-a-duration")
+	t.Setenv("SHARD_UPLOAD_TIMEOUT", "-1s")
 
 	cfg := config.Load()
 
@@ -245,6 +272,15 @@ func TestLoadRejectsInvalidFragmentLimits(t *testing.T) {
 	if cfg.FragmentTimeout != config.DefaultFragmentTimeout {
 		t.Errorf("FragmentTimeout = %v, want fallback %v", cfg.FragmentTimeout, config.DefaultFragmentTimeout)
 	}
+	if cfg.MaxValueSize != config.DefaultMaxValueSize {
+		t.Errorf("MaxValueSize = %d, want fallback %d", cfg.MaxValueSize, config.DefaultMaxValueSize)
+	}
+	if cfg.WriteTimeout != config.DefaultWriteTimeout {
+		t.Errorf("WriteTimeout = %v, want fallback %v", cfg.WriteTimeout, config.DefaultWriteTimeout)
+	}
+	if cfg.ShardUploadTimeout != config.DefaultShardUploadTimeout {
+		t.Errorf("ShardUploadTimeout = %v, want fallback %v", cfg.ShardUploadTimeout, config.DefaultShardUploadTimeout)
+	}
 }
 
 func TestWithDefaultsFillsZeroValues(t *testing.T) {
@@ -253,18 +289,26 @@ func TestWithDefaultsFillsZeroValues(t *testing.T) {
 	if cfg.MaxFragmentSize != config.DefaultMaxFragmentSize ||
 		cfg.MaxMessageSize != config.DefaultMaxMessageSize ||
 		cfg.UploadChunkSize != config.DefaultUploadChunkSize ||
-		cfg.FragmentTimeout != config.DefaultFragmentTimeout {
+		cfg.FragmentTimeout != config.DefaultFragmentTimeout ||
+		cfg.MaxValueSize != config.DefaultMaxValueSize ||
+		cfg.WriteTimeout != config.DefaultWriteTimeout ||
+		cfg.ShardUploadTimeout != config.DefaultShardUploadTimeout {
 		t.Fatalf("WithDefaults = %+v", cfg)
 	}
 
 	explicit := config.Config{
-		MaxFragmentSize: 10,
-		MaxMessageSize:  9,
-		UploadChunkSize: 8,
-		FragmentTimeout: time.Second,
+		MaxFragmentSize:    10,
+		MaxMessageSize:     9,
+		UploadChunkSize:    8,
+		FragmentTimeout:    time.Second,
+		MaxValueSize:       7,
+		WriteTimeout:       6 * time.Second,
+		ShardUploadTimeout: 5 * time.Second,
 	}.WithDefaults()
 	if explicit.MaxFragmentSize != 10 || explicit.MaxMessageSize != 9 ||
-		explicit.UploadChunkSize != 8 || explicit.FragmentTimeout != time.Second {
+		explicit.UploadChunkSize != 8 || explicit.FragmentTimeout != time.Second ||
+		explicit.MaxValueSize != 7 || explicit.WriteTimeout != 6*time.Second ||
+		explicit.ShardUploadTimeout != 5*time.Second {
 		t.Fatalf("WithDefaults overwrote explicit values: %+v", explicit)
 	}
 }
