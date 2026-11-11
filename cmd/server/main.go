@@ -96,6 +96,14 @@ func main() {
 		grpcOpts = append(grpcOpts, grpc.Creds(creds))
 	}
 
+	// Bound every gRPC message. Fragment payloads are split into
+	// UPLOAD_CHUNK_SIZE pieces, so the lower message limit never caps a
+	// complete fragment; it only rejects a single oversized message.
+	grpcOpts = append(grpcOpts,
+		grpc.MaxRecvMsgSize(cfg.MaxMessageSize),
+		grpc.MaxSendMsgSize(cfg.MaxMessageSize),
+	)
+
 	grpcServer := grpc.NewServer(grpcOpts...)
 	pb.RegisterStorageServiceServer(grpcServer, server.New(cfg, store, node, nil))
 

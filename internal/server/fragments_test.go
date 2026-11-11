@@ -886,6 +886,27 @@ func TestStatFragment(t *testing.T) {
 	requireCode(t, err, codes.InvalidArgument)
 }
 
+func TestDownloadHonorsFragmentTimeout(t *testing.T) {
+	store := newTestStore()
+	data := []byte("timeout payload")
+	if err := store.PutFragment(storage.Fragment{
+		StripeID:   "stripe-27",
+		ShardIndex: 0,
+		Data:       data,
+		Checksum:   fragmentChecksum(data),
+	}); err != nil {
+		t.Fatalf("PutFragment: %v", err)
+	}
+
+	client, _ := newFragmentTestServer(t, config.Config{FragmentTimeout: time.Nanosecond}, store)
+
+	chunks, err := downloadChunks(t, client, "stripe-27", 0)
+	if err == nil {
+		t.Fatalf("download returned %d chunks, want a deadline error", len(chunks))
+	}
+	requireCode(t, err, codes.DeadlineExceeded)
+}
+
 func TestRepairScaffold(t *testing.T) {
 	store := newTestStore()
 	client, _ := newFragmentTestServer(t, config.Config{}, store)

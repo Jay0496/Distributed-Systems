@@ -325,6 +325,13 @@ func (s *Server) DownloadFragment(req *pb.FragmentRequest, stream pb.StorageServ
 	return nil
 }
 
+// fragmentOperationContext bounds one fragment operation. The storage
+// interface predates context-aware methods, so handlers check this context
+// before and around each storage call and staging step.
+func (s *Server) fragmentOperationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, s.cfg.FragmentTimeout)
+}
+
 // validateStripeID rejects an empty stripe ID for operations that require one.
 func validateStripeID(stripeID string) error {
 	if strings.TrimSpace(stripeID) == "" {
@@ -337,7 +344,10 @@ func validateStripeID(stripeID string) error {
 // succeeds with message "absent" so repair and garbage collection are
 // idempotent.
 func (s *Server) DeleteFragment(ctx context.Context, req *pb.DeleteFragmentRequest) (*pb.FragmentOpResponse, error) {
-	if err := ctx.Err(); err != nil {
+	opCtx, cancel := s.fragmentOperationContext(ctx)
+	defer cancel()
+
+	if err := opCtx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
 	if err := validateFragmentID(req.GetStripeId(), req.GetShardIndex()); err != nil {
@@ -370,7 +380,10 @@ func (s *Server) DeleteFragment(ctx context.Context, req *pb.DeleteFragmentReque
 // DeleteStripeFragments removes every local fragment for a stripe. It is used
 // by overwrite garbage collection and is idempotent.
 func (s *Server) DeleteStripeFragments(ctx context.Context, req *pb.DeleteStripeFragmentsRequest) (*pb.FragmentOpResponse, error) {
-	if err := ctx.Err(); err != nil {
+	opCtx, cancel := s.fragmentOperationContext(ctx)
+	defer cancel()
+
+	if err := opCtx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
 	if err := validateStripeID(req.GetStripeId()); err != nil {
@@ -400,6 +413,9 @@ func (s *Server) DeleteStripeFragments(ctx context.Context, req *pb.DeleteStripe
 // ListFragments streams local fragment references, filtered by stripe when the
 // request supplies one. Payload bytes are never loaded.
 func (s *Server) ListFragments(req *pb.ListFragmentsRequest, stream pb.StorageService_ListFragmentsServer) error {
+	opCtx, cancel := s.fragmentOperationContext(stream.Context())
+	defer cancel()
+
 	if req.GetStripeId() != "" {
 		if err := validateStripeID(req.GetStripeId()); err != nil {
 			return err
@@ -412,7 +428,7 @@ func (s *Server) ListFragments(req *pb.ListFragmentsRequest, stream pb.StorageSe
 	}
 
 	for _, ref := range refs {
-		if err := stream.Context().Err(); err != nil {
+		if err := opCtx.Err(); err != nil {
 			return status.FromContextError(err).Err()
 		}
 		if err := stream.Send(fragmentInfo(ref)); err != nil {
@@ -425,7 +441,10 @@ func (s *Server) ListFragments(req *pb.ListFragmentsRequest, stream pb.StorageSe
 // StatFragment reports the size and checksum of one local fragment without
 // streaming its payload.
 func (s *Server) StatFragment(ctx context.Context, req *pb.DeleteFragmentRequest) (*pb.FragmentInfo, error) {
-	if err := ctx.Err(); err != nil {
+	opCtx, cancel := s.fragmentOperationContext(ctx)
+	defer cancel()
+
+	if err := opCtx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
 	if err := validateFragmentID(req.GetStripeId(), req.GetShardIndex()); err != nil {
