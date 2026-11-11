@@ -8,6 +8,7 @@
 | ADR-004 | Static full-cluster bootstrap plus a dynamic `Join` RPC | Accepted |
 | ADR-005 | Domain-oriented `cmd/` and `internal/` package layout | Accepted |
 | ADR-006 | Use RS(3,2) and five-copy replication on a five-node cluster | Accepted |
+| ADR-007 | Keep Raft metadata-only and move fragments out of band | Accepted |
 
 ---
 
@@ -355,4 +356,113 @@ resolves to that default. Do not implement a 3x replication mode.
   map cleanly one-per-node.
 - **Per-shard Raft groups or multi-Raft.** Out of scope for the course project;
   metadata-only Raft plus out-of-band fragment transfer is the agreed design.
+
+---
+
+## ADR-007: Keep Raft metadata-only and move fragments out of band
+
+**Date:** 2026-11-10
+**Status:** Accepted
+
+### Context
+
+The original write path put the full value in `consensus.Command` and stored it
+on every node. That made the system behave like accidental 5x replication,
+inflated the Raft log and snapshots with payload bytes, and left no way to store
+only one RS shard per node. The project needs a five-node Raft quorum and a
+redundancy layer that places fragments independently.
+
+### Decision
+
+The Raft log carries metadata only:
+
+- `put_meta` installs a `storage.KeyMeta` for a key: stripe ID, mode, size,
+  checksum, version, degraded flag, and five placements.
+- `set_meta_status` updates only the degraded flag after a repair.
+- `get_meta`, `delete_meta`, `set_config`, and `get_config` read or mutate
+  metadata and cluster configuration.
+- The leader encodes values, pushes fragments to their owners out of band, and
+  commits the metadata entry after the fragments are durable. Reads gather
+  enough fragments and verify the checksum before returning a value.
+
+Every metadata command is validated at the consensus boundary. The FSM enforces
+a 64 KiB encoded-size guard, a non-empty key and stripe ID, a concrete mode, a
+64-character SHA-256 checksum, a version of at least 1, and exactly five
+distinct placements whose parity flags match the mode. Apply returns typed
+`Result` values (`conflict`, `invalid`, `not_found`, `internal`) rather than Go
+errors so a rejected command can never look like a Raft failure.
+
+The transitional `put`/`get` commands still carry values, but the payload is
+isolated in a nested `LegacyOp` so metadata commands have no value-shaped field.
+They are exempt from the size guard only while the write path is being migrated.
+Task 06 stops writing them and task 15 removes them.
+
+Snapshots use an FSM-owned envelope with `schema_version: 2`:
+
+```json
+{
+  "schema_version": 2,
+  "metadata": { "stripes": [], "keys": [], "config": {}, "last_applied_index": 0 },
+  "legacy": []
+}
+```
+
+The metadata section is the SQLite metadata payload, including
+`last_applied_index`; the legacy section is the transitional KV payload. Restore
+runs both sections in one SQLite transaction when the store supports it, rejects
+unknown schema versions, and still reads version 1 snapshots for upgrade safety.
+Metadata snapshots never include fragment payloads.
+
+### Rationale
+
+- The storage-economy claim is only true if the log and snapshots do not contain
+  the values. This decision makes the claim testable: a 1 MiB write produces a
+  metadata entry bounded by 64 KiB.
+- Fragment placement is deterministic and independent of Raft membership. The
+  leader can push shards to five owners without creating five Raft groups.
+- Metadata commands are small, so log compaction, snapshot transfer, and replay
+  are cheap compared with writing full-value entries on every node.
+- Typed results and the applied-index guard make retries and restart replay
+  idempotent, which is required when SQLite may already be ahead of a snapshot.
+
+### Consequences
+
+**Positive**
+
+- Raft entries and snapshots contain no payload bytes.
+- RS(3,2) can store one shard per node and replication can store one copy per
+  node without changing consensus.
+- Version checks and `put_meta` idempotency prevent stale writers from
+  overwriting newer metadata.
+- A future read-index or lease read can replace the current leader-coordinated
+  read path without changing the metadata model.
+
+**Negative**
+
+- The leader coordinates writes and reads: it encodes, pushes fragments,
+  gathers shards, decodes, and triggers repair. This is extra leader load and a
+  single coordination point, acceptable for the course scope.
+- Metadata and fragments are committed separately. A crash between fragment
+  upload and metadata commit leaves orphan fragments for the local sweep; a
+  crash after metadata commit but before all fragment uploads is recorded as
+  `degraded` and repaired later.
+- The version 2 snapshot temporarily carries both metadata and legacy sections,
+  so the FSM must keep the compatibility path until the legacy commands are
+  removed.
+
+### Alternatives considered
+
+- **Put full values in Raft and replicate everything.** Rejected: that is
+  accidental 5x replication, does not support RS shard placement, and inflates
+  the log and snapshots.
+- **A Raft group per shard or per stripe.** Rejected: multi-Raft is explicitly
+  out of scope and would multiply consensus overhead for no course benefit.
+- **Commit metadata first and upload fragments afterwards.** Rejected as the
+  only path: it would make every write visible before its data is durable.
+  Uploading first and committing metadata second keeps the commit as the
+  visibility point; failures degrade and repair.
+- **Keep values in a separate Raft payload field with a size check.** Rejected:
+  a top-level value field invites accidental payload writes and makes the
+  metadata-only invariant hard to enforce. Nested `LegacyOp` is explicit and is
+  removed with the transition.
 
