@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -10,9 +9,9 @@ import (
 	"testing"
 )
 
-// TestSQLitePersistenceAcrossReopen verifies that data and parity
-// fragments remain available after the database is closed and reopened.
-func TestSQLitePersistenceAcrossReopen(t *testing.T) {
+// TestSQLiteReopenPersistence verifies that data and parity fragments remain
+// available after the database is closed and reopened.
+func TestSQLiteReopenPersistence(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "node.db")
 
 	store, err := NewSQLiteStore(dbPath)
@@ -114,8 +113,8 @@ func TestUpsertAndMissingKey(t *testing.T) {
 	}
 
 	_, err = GetChunk(db, "missing-key")
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("expected sql.ErrNoRows, got %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
 
@@ -149,12 +148,12 @@ func TestNodeIsolation(t *testing.T) {
 	}
 
 	_, err = node1.Get("fragment-B")
-	if !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("node1 should not contain node2's fragment: %v", err)
 	}
 
 	_, err = node2.Get("fragment-A")
-	if !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("node2 should not contain node1's fragment: %v", err)
 	}
 }

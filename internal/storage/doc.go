@@ -1,9 +1,10 @@
-// Package storage defines the local key-value fragment store used by the Raft
-// FSM. It provides the KVStore interface, the optional Snapshotter interface,
-// and the concrete implementations.
+// Package storage defines the local persistence layer used by the Raft FSM.
+// It provides the Store interface, the SQLite production implementation, and
+// the optional Snapshotter interface.
 //
-// MockStore is an in-memory development and test double. It remains in this
-// package temporarily and is removed from production wiring by the SQLite
-// production-store task; new code should depend on KVStore, with SQLiteStore as
-// the production implementation.
+// Metadata snapshots never contain fragment payloads. Fragments are durable on
+// their owner nodes and are repaired from peers when missing.
+//
+// Test doubles live under tests/support; production packages must not import
+// them.
 package storage

@@ -29,11 +29,11 @@ type GetResult struct {
 // FSM is the Finite State Machine that Raft uses to apply committed log entries.
 // It is the bridge between the Raft log and the actual key-value store.
 type FSM struct {
-	store storage.KVStore
+	store storage.Store
 }
 
-// NewFSM creates a new FSM backed by the given key-value store.
-func NewFSM(store storage.KVStore) *FSM {
+// NewFSM creates a new FSM backed by the given store.
+func NewFSM(store storage.Store) *FSM {
 	return &FSM{store: store}
 }
 

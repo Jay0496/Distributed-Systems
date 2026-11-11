@@ -53,7 +53,7 @@ func (n *Node) Close() error {
 // that a restarted container can replay its log and rejoin the cluster.
 // If bootstrapConfig contains at least one server and no state exists yet,
 // the cluster is bootstrapped.
-func StartRaft(nodeID string, store storage.KVStore, transport raft.Transport, dataDir string, bootstrapConfig raft.Configuration) (*Node, error) {
+func StartRaft(nodeID string, store storage.Store, transport raft.Transport, dataDir string, bootstrapConfig raft.Configuration) (*Node, error) {
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(nodeID)
 

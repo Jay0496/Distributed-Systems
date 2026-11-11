@@ -6,7 +6,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Config holds the runtime configuration for a single storage node.
@@ -22,6 +24,11 @@ type Config struct {
 	TLSKey     string
 	TLSCA      string
 
+	// StorePath is the SQLite database for metadata and local fragments.
+	StorePath string
+	// StoreBusyTimeout bounds SQLite lock waits.
+	StoreBusyTimeout time.Duration
+
 	// BootstrapServers maps Raft server ID -> Raft address.
 	BootstrapServers map[string]string
 	// Peers maps Raft server ID -> gRPC address.
@@ -30,11 +37,15 @@ type Config struct {
 
 // Load reads the node configuration from environment variables.
 func Load() Config {
+	dataDir := envOr("DATA_DIR", "/data")
+
 	cfg := Config{
 		NodeID:           envOr("NODE_ID", "node1"),
 		GRPCPort:         envOr("PORT", "50051"),
 		RaftPort:         envOr("RAFT_PORT", "60051"),
-		DataDir:          envOr("DATA_DIR", "/data"),
+		DataDir:          dataDir,
+		StorePath:        envOr("STORE_PATH", filepath.Join(dataDir, "node.db")),
+		StoreBusyTimeout: durationOr("STORE_BUSY_TIMEOUT", 5*time.Second),
 		Bootstrap:        os.Getenv("BOOTSTRAP") == "true",
 		JoinAddr:         os.Getenv("JOIN_ADDR"),
 		TLSEnabled:       os.Getenv("TLS_ENABLED") == "true",
@@ -52,6 +63,19 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func durationOr(key string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		fmt.Fprintf(os.Stderr, "invalid %s %q, using %s\n", key, raw, fallback)
+		return fallback
+	}
+	return value
 }
 
 // parsePeerMap parses "id1=host:port,id2=host:port" into a map.

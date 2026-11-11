@@ -16,14 +16,14 @@ flowchart TB
             F1["forwarder"]
             R1["Raft :60051"]
             FSM1["FSM"]
-            ST1["KVStore<br/>(MockStore today)"]
+            ST1["Store<br/>(SQLite node.db)"]
             D1[("volume node1-data<br/>raft.db + snapshots/")]
         end
         subgraph n2["node2"]
             G2["gRPC :50052"]
             S2["server"]
             R2["Raft :60052"]
-            ST2["KVStore"]
+            ST2["Store"]
             D2[("volume node2-data")]
         end
         subgraph nN["node3 ... node5"]
@@ -50,8 +50,8 @@ flowchart TB
 
 Every node runs exactly the same binary. `internal/server` is the gRPC front end,
 `internal/consensus.Node` owns the Raft instance and the FSM, and
-`internal/storage.KVStore` is the state-machine backend. Raft log and stable
-state live in BoltDB; snapshots live on the filesystem.
+`internal/storage.Store` is the state-machine backend. Raft log and stable
+state live in BoltDB; snapshots and the SQLite database live on the filesystem.
 
 ## Package layout
 
@@ -64,7 +64,7 @@ cmd/bench         benchmark harness placeholder
 internal/config      environment parsing and validation
 internal/server      gRPC handlers, forwarding, fragment transport
 internal/consensus   Raft node, FSM, metadata commands
-internal/storage     Store interface, SQLite store, temporary MockStore
+internal/storage     Store interface, SQLite metadata/fragment/config repositories
 internal/redundancy  redundancy-engine seam and mode validation (no-op today)
 internal/gateway     consistent-hash router
 internal/cluster     failure detection and repair (created now, populated later)
@@ -82,10 +82,10 @@ Dependency direction:
   `cmd/*`.
 - `tests/support` is test-only; production packages must not import it.
 
-The package move was behaviour-preserving. `internal/storage.MockStore` and
-`internal/redundancy.NoopRedundancy` remain only as documented temporary
-placeholders for the SQLite and redundancy tasks; see
-[tests/README.md](../tests/README.md).
+The package move was behaviour-preserving. `internal/storage.MockStore` was
+removed from production in the SQLite task and now lives in `tests/support`;
+`internal/redundancy.NoopRedundancy` remains a documented temporary placeholder
+for the redundancy task. See [tests/README.md](../tests/README.md).
 
 ## Request path
 
@@ -97,7 +97,7 @@ sequenceDiagram
     participant F as Follower
     participant L as Leader
     participant R as Raft group
-    participant S as KVStore
+    participant S as Store
 
     C->>F: Put(key, value, mode)
     F->>F: validate mode
@@ -120,7 +120,7 @@ sequenceDiagram
 4. The leader wraps the request in a `consensus.Command` and calls
    `Raft.Apply` with a 10 s timeout. The call returns once the entry is
    committed by a quorum.
-5. `FSM.Apply` runs on all nodes and writes into the local `KVStore`.
+5. `FSM.Apply` runs on all nodes and writes into the local `Store`.
 
 ### Read
 
@@ -164,16 +164,29 @@ check) and discover the existing cluster through their persisted state or, if
 
 ```
 /data/
-├── raft.db            # BoltDB buckets: logs, stable (term/vote), configuration
+├── node.db              # SQLite metadata, local fragments, legacy KV state
+├── node.db-wal          # SQLite write-ahead log (present while open)
+├── node.db-shm          # SQLite shared-memory index (present while open)
+├── raft.db              # BoltDB buckets: logs, stable (term/vote), configuration
 └── snapshots/
     ├── <term>-<index>-<timestamp>.meta
     └── <term>-<index>-<timestamp>.state
 ```
 
-The KV payload itself is not written directly to disk today; it is rebuilt on
-startup by replaying the Raft log and restoring the newest snapshot into the
-store. This is why `storage.Snapshotter` matters: a store that implements it can
-be snapshotted and restored as a whole, and `MockStore` does so with JSON.
+SQLite is opened before Raft starts and closed after Raft and gRPC stop. It
+holds the legacy full-value `store` table during the transition, the metadata
+tables used by later tasks (`keys`, `stripes`, `placements`), local `fragments`,
+the singleton `cluster_config`, and `raft_state.last_applied_index`.
+
+Raft snapshots capture the FSM state. Until task 06 the FSM still writes the
+legacy `store` table, so `Snapshot`/`Restore` cover that table; the restore path
+also accepts snapshots written by the previous in-memory store. The
+metadata-only snapshot path (`SnapshotMetadata`/`RestoreMetadata`) is already
+implemented for task 04 and deliberately excludes fragment payloads: fragments
+are durable on their owner nodes and repaired from peers when missing.
+
+The `fragments` table exists now but the server does not write it until the
+write path is integrated in task 06.
 
 ## Consistency model
 
@@ -194,7 +207,7 @@ be snapshotted and restored as a whole, and `MockStore` does so with JSON.
 | Follower dies | Quorum (3/5) still commits. On restart the follower's BoltDB log replays, then the leader streams the missing entries. |
 | Leader dies | Remaining nodes elect a new leader after the election timeout. Followers re-resolve the leader on the next request. |
 | Leader restarts | It rejoins as a follower using its persisted log and configuration; a new leader may already exist. |
-| Whole cluster restarts | Each node reopens `raft.db`, restores state, and rejoins the persisted configuration; the leader is re-elected. |
+| Whole cluster restarts | Each node reopens `raft.db` and `node.db`, restores state, and rejoins the persisted configuration; the leader is re-elected. |
 | Log grows | Raft triggers a snapshot; the FSM serializes the store, and old log entries are truncated. |
 | Stale membership | `BOOTSTRAP_SERVERS` is only applied to a node with no state, so live membership changes survive restarts. |
 
@@ -213,7 +226,10 @@ in [DECISIONS.md](DECISIONS.md) (ADR-001).
 
 ## Known limitations
 
-- The store is still the in-memory mock; SQLite persistence is in progress.
+- The write path still stores the full value in the legacy `store` table; the
+  metadata-only path lands in tasks 04 and 06.
+- Local fragments are not written by the server until the write path is
+  integrated, although the SQLite tables and repository APIs exist.
 - `x-kv-forwarded` prevents loops but assumes `PEERS` is complete and correct.
 - Reads append log entries (no read-index optimisation yet).
 - Reed-Solomon encoding (`rs32`) and repair are interfaces/scaffolds only.

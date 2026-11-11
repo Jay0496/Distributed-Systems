@@ -1,13 +1,18 @@
-package storage
+package storage_test
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
+
+	"distributed-kv-store/internal/storage"
+	"distributed-kv-store/tests/support"
 )
 
 func TestMockStorePutGet(t *testing.T) {
-	store := NewMockStore()
+	store := support.NewMockStore()
+	t.Cleanup(func() { _ = store.Close() })
 
 	if err := store.Put("alpha", []byte("one"), false); err != nil {
 		t.Fatalf("Put failed: %v", err)
@@ -22,21 +27,23 @@ func TestMockStorePutGet(t *testing.T) {
 }
 
 func TestMockStoreMissingKey(t *testing.T) {
-	store := NewMockStore()
+	store := support.NewMockStore()
+	t.Cleanup(func() { _ = store.Close() })
 
-	if _, err := store.Get("missing"); err == nil {
-		t.Fatal("expected an error for a missing key")
+	if _, err := store.Get("missing"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
 
 func TestMockStoreCopiesValues(t *testing.T) {
-	store := NewMockStore()
+	store := support.NewMockStore()
+	t.Cleanup(func() { _ = store.Close() })
+
 	input := []byte("original")
 	if err := store.Put("key", input, false); err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
 
-	// Mutating the caller's slice must not change stored data.
 	input[0] = 'X'
 	got, err := store.Get("key")
 	if err != nil {
@@ -46,7 +53,6 @@ func TestMockStoreCopiesValues(t *testing.T) {
 		t.Fatalf("store aliased caller memory: got %q", got)
 	}
 
-	// Mutating the returned slice must not change stored data either.
 	got[0] = 'Y'
 	again, _ := store.Get("key")
 	if string(again) != "original" {
@@ -55,7 +61,9 @@ func TestMockStoreCopiesValues(t *testing.T) {
 }
 
 func TestMockStoreSnapshotRestore(t *testing.T) {
-	store := NewMockStore()
+	store := support.NewMockStore()
+	t.Cleanup(func() { _ = store.Close() })
+
 	if err := store.Put("a", []byte("1"), false); err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
@@ -68,7 +76,8 @@ func TestMockStoreSnapshotRestore(t *testing.T) {
 		t.Fatalf("Snapshot failed: %v", err)
 	}
 
-	restored := NewMockStore()
+	restored := support.NewMockStore()
+	t.Cleanup(func() { _ = restored.Close() })
 	if err := restored.Restore(snapshot); err != nil {
 		t.Fatalf("Restore failed: %v", err)
 	}
@@ -85,7 +94,8 @@ func TestMockStoreSnapshotRestore(t *testing.T) {
 }
 
 func TestMockStoreConcurrentAccess(t *testing.T) {
-	store := NewMockStore()
+	store := support.NewMockStore()
+	t.Cleanup(func() { _ = store.Close() })
 
 	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {

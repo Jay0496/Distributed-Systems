@@ -10,7 +10,6 @@ import (
 
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/consensus"
-	"distributed-kv-store/internal/storage"
 
 	pb "distributed-kv-store/proto"
 
@@ -32,7 +31,7 @@ type testNode struct {
 	id        string
 	raftAddr  raft.ServerAddress
 	transport *raft.InmemTransport
-	store     *storage.MockStore
+	store     *testStore
 	node      *consensus.Node
 
 	lis     *bufconn.Listener
@@ -74,7 +73,7 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 			id:        id,
 			raftAddr:  addr,
 			transport: trans,
-			store:     storage.NewMockStore(),
+			store:     newTestStore(),
 			lis:       bufconn.Listen(testBufSize),
 		}
 		c.nodes[i] = tn
