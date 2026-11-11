@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -23,17 +22,6 @@ type ShardRef struct {
 	NodeID     string
 	Corrupt    bool
 }
-
-// Read-path errors. They are sentinel values so handlers can map each failure
-// to the documented gRPC status without parsing error strings.
-var (
-	// ErrInsufficientShards means fewer than three RS shards or zero valid
-	// replication copies were available.
-	ErrInsufficientShards = errors.New("insufficient valid shards")
-	// ErrDataLoss means enough shards arrived but no subset reconstructed a
-	// value matching the committed size and checksum.
-	ErrDataLoss = errors.New("read data loss")
-)
 
 // read serves a leader-side read: linearizable metadata from Raft, then enough
 // verified fragments to reconstruct the value.
@@ -92,7 +80,7 @@ func (s *Server) readVerified(ctx context.Context, meta storage.KeyMeta) ([]byte
 	}
 
 	if mode == redundancy.ModeReplication {
-		return s.readReplication(ctx, meta, mode)
+		return s.readReplication(ctx, meta)
 	}
 	return s.readRS32(ctx, meta, mode)
 }
@@ -119,8 +107,13 @@ func (s *Server) readRS32(ctx context.Context, meta storage.KeyMeta, mode redund
 	}
 
 	if len(valid) < redundancy.RSDataShards {
-		return nil, failed, fmt.Errorf("%w: %d valid RS shards, need %d; failed owners: %s",
-			ErrInsufficientShards, len(valid), redundancy.RSDataShards, formatShardRefs(failed))
+		live := make([]ShardRef, 0, len(valid))
+		for _, shard := range valid {
+			live = append(live, shard.ref)
+		}
+		return nil, failed, fmt.Errorf("%w: %d valid RS shards, need %d; live owners: %s; failed owners: %s",
+			ErrInsufficientShards, len(valid), redundancy.RSDataShards,
+			formatShardRefs(live), formatShardRefs(failed))
 	}
 	if !ok {
 		return nil, failed, fmt.Errorf("%w: no three RS shards reconstructed the committed checksum; failed owners: %s",
@@ -131,7 +124,7 @@ func (s *Server) readRS32(ctx context.Context, meta storage.KeyMeta, mode redund
 
 // readReplication tries copies in shard-index order and falls back to other
 // placements when a copy fails the final value checksum.
-func (s *Server) readReplication(ctx context.Context, meta storage.KeyMeta, mode redundancy.Mode) ([]byte, []ShardRef, error) {
+func (s *Server) readReplication(ctx context.Context, meta storage.KeyMeta) ([]byte, []ShardRef, error) {
 	valid, failed, attempted, err := s.gatherShards(ctx, meta, 1, meta.Degraded, nil)
 	if err != nil {
 		return nil, failed, err
@@ -158,7 +151,6 @@ func (s *Server) readReplication(ctx context.Context, meta storage.KeyMeta, mode
 		return nil, failed, fmt.Errorf("%w: no replication copy matched the committed size and checksum; failed owners: %s",
 			ErrDataLoss, formatShardRefs(failed))
 	}
-	_ = mode
 	return value, failed, nil
 }
 
@@ -263,26 +255,4 @@ func formatShardRefs(refs []ShardRef) string {
 		parts = append(parts, fmt.Sprintf("%d@%s (%s)", ref.ShardIndex, ref.NodeID, state))
 	}
 	return strings.Join(parts, ", ")
-}
-
-// readStatusError maps read-path failures to the documented gRPC statuses.
-// Application failures are status errors because GetResponse has no message
-// field; transport-level failures from forwarding are propagated unchanged.
-func readStatusError(err error) error {
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, ErrInsufficientShards):
-		return status.Error(codes.FailedPrecondition, err.Error())
-	case errors.Is(err, ErrDataLoss):
-		return status.Error(codes.DataLoss, err.Error())
-	case errors.Is(err, storage.ErrNotFound):
-		return status.Error(codes.NotFound, "key not found")
-	case errors.Is(err, context.DeadlineExceeded):
-		return status.Error(codes.DeadlineExceeded, err.Error())
-	case errors.Is(err, context.Canceled):
-		return status.Error(codes.Canceled, err.Error())
-	default:
-		return status.Error(codes.Internal, err.Error())
-	}
 }

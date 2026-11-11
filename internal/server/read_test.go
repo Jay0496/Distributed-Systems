@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -389,6 +390,157 @@ func TestReadVerifiedDoesNotEnqueueRepair(t *testing.T) {
 	}
 	if queue.len() != 0 {
 		t.Fatalf("ReadVerified enqueued %d repair tasks", queue.len())
+	}
+}
+
+func TestReadAllOwnersDown(t *testing.T) {
+	store := newTestStore()
+	srv := newReadTestServer(store)
+	value := []byte("all owners unreachable")
+	meta := storage.KeyMeta{
+		Key:      "down",
+		StripeID: "stripe-down",
+		Mode:     string(redundancy.ModeRS32),
+		Size:     int64(len(value)),
+		Checksum: redundancy.Checksum(value),
+		Version:  1,
+		Placement: []storage.ShardPlacement{
+			{ShardIndex: 0, NodeID: "node1"},
+			{ShardIndex: 1, NodeID: "node2"},
+			{ShardIndex: 2, NodeID: "node3"},
+			{ShardIndex: 3, NodeID: "node4", IsParity: true},
+			{ShardIndex: 4, NodeID: "node5", IsParity: true},
+		},
+	}
+	if _, err := store.ApplyPutMeta(1, meta); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+
+	_, err := srv.read(context.Background(), &pb.GetRequest{Key: "down"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("all-owners-down read = %v, want FailedPrecondition", err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("live owners")) ||
+		!bytes.Contains([]byte(err.Error()), []byte("failed owners")) {
+		t.Fatalf("error does not list owners: %v", err)
+	}
+}
+
+func TestReadAllShardsCorrupt(t *testing.T) {
+	store := newTestStore()
+	srv := newReadTestServer(store)
+	value := bytes.Repeat([]byte("all-corrupt-"), 43)
+	shards := encodeForTest(t, redundancy.ModeRS32, value)
+	meta := storage.KeyMeta{
+		Key:       "corrupt-all",
+		StripeID:  "stripe-corrupt-all",
+		Mode:      string(redundancy.ModeRS32),
+		Size:      int64(len(value)),
+		Checksum:  redundancy.Checksum(value),
+		Version:   1,
+		Placement: localPlacements(),
+	}
+	if _, err := store.ApplyPutMeta(1, meta); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+	for _, shard := range shards {
+		data := append([]byte(nil), shard.Data...)
+		data[0] ^= 0xff
+		if err := store.PutFragment(storage.Fragment{
+			StripeID:   meta.StripeID,
+			ShardIndex: shard.Index,
+			Data:       data,
+			// Keep the original checksum so every fetch rejects the fragment.
+			Checksum: shard.Checksum,
+			IsParity: shard.IsParity,
+		}); err != nil {
+			t.Fatalf("seed corrupt shard %d: %v", shard.Index, err)
+		}
+	}
+
+	_, err := srv.read(context.Background(), &pb.GetRequest{Key: "corrupt-all"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("all-corrupt read = %v, want FailedPrecondition", err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("corrupt")) {
+		t.Fatalf("error does not identify corrupt shards: %v", err)
+	}
+}
+
+func TestReadChecksumMismatchWithEnoughShards(t *testing.T) {
+	store := newTestStore()
+	srv := newReadTestServer(store)
+	want := bytes.Repeat([]byte("the-real-value-"), 37)
+	shardSize := (len(want) + redundancy.RSDataShards - 1) / redundancy.RSDataShards
+
+	meta := storage.KeyMeta{
+		Key:       "mismatch",
+		StripeID:  "stripe-mismatch",
+		Mode:      string(redundancy.ModeRS32),
+		Size:      int64(len(want)),
+		Checksum:  redundancy.Checksum(want),
+		Version:   1,
+		Placement: localPlacements(),
+	}
+	if _, err := store.ApplyPutMeta(1, meta); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+	for i := 0; i < redundancy.RSDataShards; i++ {
+		data := bytes.Repeat([]byte{byte('a' + i)}, shardSize)
+		if err := store.PutFragment(storage.Fragment{
+			StripeID:   meta.StripeID,
+			ShardIndex: i,
+			Data:       data,
+			Checksum:   redundancy.Checksum(data),
+			IsParity:   i >= redundancy.RSDataShards,
+		}); err != nil {
+			t.Fatalf("seed shard %d: %v", i, err)
+		}
+	}
+
+	value, _, err := srv.readVerified(context.Background(), meta)
+	if !errors.Is(err, ErrDataLoss) {
+		t.Fatalf("readVerified = %v, want ErrDataLoss", err)
+	}
+	if value != nil {
+		t.Fatal("readVerified returned bytes for a checksum mismatch")
+	}
+	if status.Code(readStatusError(err)) != codes.DataLoss {
+		t.Fatalf("DataLoss mapping = %v", readStatusError(err))
+	}
+}
+
+func TestReadMetadataTimeoutMapsToDeadlineExceeded(t *testing.T) {
+	store := newTestStore()
+	srv := newReadTestServer(store)
+	srv.apply = func([]byte, time.Duration) (interface{}, error) {
+		return nil, context.DeadlineExceeded
+	}
+
+	_, err := srv.read(context.Background(), &pb.GetRequest{Key: "timeout"})
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("metadata timeout = %v, want DeadlineExceeded", err)
+	}
+}
+
+func TestReadStatusErrorMapping(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want codes.Code
+	}{
+		{name: "not found", err: storage.ErrNotFound, want: codes.NotFound},
+		{name: "insufficient shards", err: ErrInsufficientShards, want: codes.FailedPrecondition},
+		{name: "data loss", err: ErrDataLoss, want: codes.DataLoss},
+		{name: "deadline", err: context.DeadlineExceeded, want: codes.DeadlineExceeded},
+		{name: "internal", err: errors.New("disk exploded"), want: codes.Internal},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := status.Code(readStatusError(tc.err)); got != tc.want {
+				t.Fatalf("status = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
