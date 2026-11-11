@@ -19,14 +19,18 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	StorageService_Put_FullMethodName              = "/storage.StorageService/Put"
-	StorageService_Get_FullMethodName              = "/storage.StorageService/Get"
-	StorageService_Heartbeat_FullMethodName        = "/storage.StorageService/Heartbeat"
-	StorageService_Join_FullMethodName             = "/storage.StorageService/Join"
-	StorageService_NodeStatus_FullMethodName       = "/storage.StorageService/NodeStatus"
-	StorageService_UploadFragment_FullMethodName   = "/storage.StorageService/UploadFragment"
-	StorageService_DownloadFragment_FullMethodName = "/storage.StorageService/DownloadFragment"
-	StorageService_Repair_FullMethodName           = "/storage.StorageService/Repair"
+	StorageService_Put_FullMethodName                   = "/storage.StorageService/Put"
+	StorageService_Get_FullMethodName                   = "/storage.StorageService/Get"
+	StorageService_Heartbeat_FullMethodName             = "/storage.StorageService/Heartbeat"
+	StorageService_Join_FullMethodName                  = "/storage.StorageService/Join"
+	StorageService_NodeStatus_FullMethodName            = "/storage.StorageService/NodeStatus"
+	StorageService_UploadFragment_FullMethodName        = "/storage.StorageService/UploadFragment"
+	StorageService_DownloadFragment_FullMethodName      = "/storage.StorageService/DownloadFragment"
+	StorageService_DeleteFragment_FullMethodName        = "/storage.StorageService/DeleteFragment"
+	StorageService_DeleteStripeFragments_FullMethodName = "/storage.StorageService/DeleteStripeFragments"
+	StorageService_ListFragments_FullMethodName         = "/storage.StorageService/ListFragments"
+	StorageService_StatFragment_FullMethodName          = "/storage.StorageService/StatFragment"
+	StorageService_Repair_FullMethodName                = "/storage.StorageService/Repair"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -42,8 +46,23 @@ type StorageServiceClient interface {
 	NodeStatus(ctx context.Context, in *NodeStatusRequest, opts ...grpc.CallOption) (*NodeStatusResponse, error)
 	// Fragment streaming is the transport used by the redundancy engine to
 	// move Reed-Solomon data and parity chunks between nodes.
+	//
+	// Fragment identity is the pair (stripe_id, shard_index). Shard indices are
+	// global: 0, 1, 2 are RS data shards, 3 and 4 are RS parity shards, and all
+	// five indices are full copies in replication mode. Legacy key/index/
+	// is_parity fields remain for wire compatibility but are ignored by v2.
 	UploadFragment(ctx context.Context, opts ...grpc.CallOption) (StorageService_UploadFragmentClient, error)
 	DownloadFragment(ctx context.Context, in *FragmentRequest, opts ...grpc.CallOption) (StorageService_DownloadFragmentClient, error)
+	// DeleteFragment removes one local fragment. It is idempotent.
+	DeleteFragment(ctx context.Context, in *DeleteFragmentRequest, opts ...grpc.CallOption) (*FragmentOpResponse, error)
+	// DeleteStripeFragments removes every local fragment for a stripe. It is
+	// used by overwrite garbage collection and is idempotent.
+	DeleteStripeFragments(ctx context.Context, in *DeleteStripeFragmentsRequest, opts ...grpc.CallOption) (*FragmentOpResponse, error)
+	// ListFragments streams local fragment references. An empty stripe_id lists
+	// every local fragment; repair uses it to detect missing local shards.
+	ListFragments(ctx context.Context, in *ListFragmentsRequest, opts ...grpc.CallOption) (StorageService_ListFragmentsClient, error)
+	// StatFragment reports size and checksum without transferring the payload.
+	StatFragment(ctx context.Context, in *DeleteFragmentRequest, opts ...grpc.CallOption) (*FragmentInfo, error)
 	// Repair is the entry point for the failure-management subsystem to ask a
 	// node to rebuild a missing fragment.
 	Repair(ctx context.Context, in *RepairRequest, opts ...grpc.CallOption) (*RepairResponse, error)
@@ -168,6 +187,65 @@ func (x *storageServiceDownloadFragmentClient) Recv() (*FragmentChunk, error) {
 	return m, nil
 }
 
+func (c *storageServiceClient) DeleteFragment(ctx context.Context, in *DeleteFragmentRequest, opts ...grpc.CallOption) (*FragmentOpResponse, error) {
+	out := new(FragmentOpResponse)
+	err := c.cc.Invoke(ctx, StorageService_DeleteFragment_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) DeleteStripeFragments(ctx context.Context, in *DeleteStripeFragmentsRequest, opts ...grpc.CallOption) (*FragmentOpResponse, error) {
+	out := new(FragmentOpResponse)
+	err := c.cc.Invoke(ctx, StorageService_DeleteStripeFragments_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) ListFragments(ctx context.Context, in *ListFragmentsRequest, opts ...grpc.CallOption) (StorageService_ListFragmentsClient, error) {
+	stream, err := c.cc.NewStream(ctx, &StorageService_ServiceDesc.Streams[2], StorageService_ListFragments_FullMethodName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &storageServiceListFragmentsClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type StorageService_ListFragmentsClient interface {
+	Recv() (*FragmentInfo, error)
+	grpc.ClientStream
+}
+
+type storageServiceListFragmentsClient struct {
+	grpc.ClientStream
+}
+
+func (x *storageServiceListFragmentsClient) Recv() (*FragmentInfo, error) {
+	m := new(FragmentInfo)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (c *storageServiceClient) StatFragment(ctx context.Context, in *DeleteFragmentRequest, opts ...grpc.CallOption) (*FragmentInfo, error) {
+	out := new(FragmentInfo)
+	err := c.cc.Invoke(ctx, StorageService_StatFragment_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *storageServiceClient) Repair(ctx context.Context, in *RepairRequest, opts ...grpc.CallOption) (*RepairResponse, error) {
 	out := new(RepairResponse)
 	err := c.cc.Invoke(ctx, StorageService_Repair_FullMethodName, in, out, opts...)
@@ -190,8 +268,23 @@ type StorageServiceServer interface {
 	NodeStatus(context.Context, *NodeStatusRequest) (*NodeStatusResponse, error)
 	// Fragment streaming is the transport used by the redundancy engine to
 	// move Reed-Solomon data and parity chunks between nodes.
+	//
+	// Fragment identity is the pair (stripe_id, shard_index). Shard indices are
+	// global: 0, 1, 2 are RS data shards, 3 and 4 are RS parity shards, and all
+	// five indices are full copies in replication mode. Legacy key/index/
+	// is_parity fields remain for wire compatibility but are ignored by v2.
 	UploadFragment(StorageService_UploadFragmentServer) error
 	DownloadFragment(*FragmentRequest, StorageService_DownloadFragmentServer) error
+	// DeleteFragment removes one local fragment. It is idempotent.
+	DeleteFragment(context.Context, *DeleteFragmentRequest) (*FragmentOpResponse, error)
+	// DeleteStripeFragments removes every local fragment for a stripe. It is
+	// used by overwrite garbage collection and is idempotent.
+	DeleteStripeFragments(context.Context, *DeleteStripeFragmentsRequest) (*FragmentOpResponse, error)
+	// ListFragments streams local fragment references. An empty stripe_id lists
+	// every local fragment; repair uses it to detect missing local shards.
+	ListFragments(*ListFragmentsRequest, StorageService_ListFragmentsServer) error
+	// StatFragment reports size and checksum without transferring the payload.
+	StatFragment(context.Context, *DeleteFragmentRequest) (*FragmentInfo, error)
 	// Repair is the entry point for the failure-management subsystem to ask a
 	// node to rebuild a missing fragment.
 	Repair(context.Context, *RepairRequest) (*RepairResponse, error)
@@ -222,6 +315,18 @@ func (UnimplementedStorageServiceServer) UploadFragment(StorageService_UploadFra
 }
 func (UnimplementedStorageServiceServer) DownloadFragment(*FragmentRequest, StorageService_DownloadFragmentServer) error {
 	return status.Errorf(codes.Unimplemented, "method DownloadFragment not implemented")
+}
+func (UnimplementedStorageServiceServer) DeleteFragment(context.Context, *DeleteFragmentRequest) (*FragmentOpResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteFragment not implemented")
+}
+func (UnimplementedStorageServiceServer) DeleteStripeFragments(context.Context, *DeleteStripeFragmentsRequest) (*FragmentOpResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteStripeFragments not implemented")
+}
+func (UnimplementedStorageServiceServer) ListFragments(*ListFragmentsRequest, StorageService_ListFragmentsServer) error {
+	return status.Errorf(codes.Unimplemented, "method ListFragments not implemented")
+}
+func (UnimplementedStorageServiceServer) StatFragment(context.Context, *DeleteFragmentRequest) (*FragmentInfo, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StatFragment not implemented")
 }
 func (UnimplementedStorageServiceServer) Repair(context.Context, *RepairRequest) (*RepairResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Repair not implemented")
@@ -376,6 +481,81 @@ func (x *storageServiceDownloadFragmentServer) Send(m *FragmentChunk) error {
 	return x.ServerStream.SendMsg(m)
 }
 
+func _StorageService_DeleteFragment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteFragmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).DeleteFragment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_DeleteFragment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).DeleteFragment(ctx, req.(*DeleteFragmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_DeleteStripeFragments_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteStripeFragmentsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).DeleteStripeFragments(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_DeleteStripeFragments_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).DeleteStripeFragments(ctx, req.(*DeleteStripeFragmentsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_ListFragments_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ListFragmentsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(StorageServiceServer).ListFragments(m, &storageServiceListFragmentsServer{stream})
+}
+
+type StorageService_ListFragmentsServer interface {
+	Send(*FragmentInfo) error
+	grpc.ServerStream
+}
+
+type storageServiceListFragmentsServer struct {
+	grpc.ServerStream
+}
+
+func (x *storageServiceListFragmentsServer) Send(m *FragmentInfo) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func _StorageService_StatFragment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteFragmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).StatFragment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_StatFragment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).StatFragment(ctx, req.(*DeleteFragmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _StorageService_Repair_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RepairRequest)
 	if err := dec(in); err != nil {
@@ -422,6 +602,18 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _StorageService_NodeStatus_Handler,
 		},
 		{
+			MethodName: "DeleteFragment",
+			Handler:    _StorageService_DeleteFragment_Handler,
+		},
+		{
+			MethodName: "DeleteStripeFragments",
+			Handler:    _StorageService_DeleteStripeFragments_Handler,
+		},
+		{
+			MethodName: "StatFragment",
+			Handler:    _StorageService_StatFragment_Handler,
+		},
+		{
 			MethodName: "Repair",
 			Handler:    _StorageService_Repair_Handler,
 		},
@@ -435,6 +627,11 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "DownloadFragment",
 			Handler:       _StorageService_DownloadFragment_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "ListFragments",
+			Handler:       _StorageService_ListFragments_Handler,
 			ServerStreams: true,
 		},
 	},

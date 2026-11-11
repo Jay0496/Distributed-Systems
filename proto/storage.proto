@@ -15,8 +15,27 @@ service StorageService {
 
   // Fragment streaming is the transport used by the redundancy engine to
   // move Reed-Solomon data and parity chunks between nodes.
+  //
+  // Fragment identity is the pair (stripe_id, shard_index). Shard indices are
+  // global: 0, 1, 2 are RS data shards, 3 and 4 are RS parity shards, and all
+  // five indices are full copies in replication mode. Legacy key/index/
+  // is_parity fields remain for wire compatibility but are ignored by v2.
   rpc UploadFragment (stream FragmentChunk) returns (FragmentResponse);
   rpc DownloadFragment (FragmentRequest) returns (stream FragmentChunk);
+
+  // DeleteFragment removes one local fragment. It is idempotent.
+  rpc DeleteFragment (DeleteFragmentRequest) returns (FragmentOpResponse);
+
+  // DeleteStripeFragments removes every local fragment for a stripe. It is
+  // used by overwrite garbage collection and is idempotent.
+  rpc DeleteStripeFragments (DeleteStripeFragmentsRequest) returns (FragmentOpResponse);
+
+  // ListFragments streams local fragment references. An empty stripe_id lists
+  // every local fragment; repair uses it to detect missing local shards.
+  rpc ListFragments (ListFragmentsRequest) returns (stream FragmentInfo);
+
+  // StatFragment reports size and checksum without transferring the payload.
+  rpc StatFragment (DeleteFragmentRequest) returns (FragmentInfo);
 
   // Repair is the entry point for the failure-management subsystem to ask a
   // node to rebuild a missing fragment.
@@ -77,10 +96,32 @@ message NodeStatusResponse {
 }
 
 message FragmentChunk {
-  string key = 1;
-  int32 index = 2;
+  // Legacy v1 fields. Kept so existing clients compile and old wire messages
+  // remain decodable; v2 servers ignore key, index, and is_parity on upload.
+  string key = 1 [deprecated = true];
+  int32 index = 2 [deprecated = true];
   bytes data = 3;
-  bool is_parity = 4;
+  bool is_parity = 4 [deprecated = true];
+
+  // Global stripe identity. shard_index is 0..4 in both redundancy modes.
+  string stripe_id = 5;
+  int32 shard_index = 6;
+
+  // SHA-256 hex digest of the complete fragment. Repeated on every chunk and
+  // verified before the staged fragment is committed.
+  string checksum = 7;
+
+  // Byte offset of this chunk within the complete fragment and the total
+  // fragment size. Chunks must arrive in order with no gaps or overlaps.
+  int64 offset = 8;
+  int64 total_size = 9;
+
+  // Set on the final chunk of an upload.
+  bool last = 10;
+
+  // Repair only: allow replacing an existing fragment with a different
+  // checksum. Ordinary writes must always send false.
+  bool replace = 11;
 }
 
 message FragmentResponse {
@@ -89,8 +130,38 @@ message FragmentResponse {
 }
 
 message FragmentRequest {
-  string key = 1;
-  int32 index = 2;
+  string key = 1 [deprecated = true];
+  int32 index = 2 [deprecated = true];
+  string stripe_id = 3;
+  int32 shard_index = 4;
+}
+
+// FragmentInfo describes a locally stored fragment without its payload.
+message FragmentInfo {
+  string stripe_id = 1;
+  int32 shard_index = 2;
+  bool is_parity = 3;
+  int64 size = 4;
+  string checksum = 5;
+}
+
+message DeleteFragmentRequest {
+  string stripe_id = 1;
+  int32 shard_index = 2;
+}
+
+message DeleteStripeFragmentsRequest {
+  string stripe_id = 1;
+}
+
+message ListFragmentsRequest {
+  // Empty lists every local fragment.
+  string stripe_id = 1;
+}
+
+message FragmentOpResponse {
+  bool success = 1;
+  string message = 2;
 }
 
 message RepairRequest {
