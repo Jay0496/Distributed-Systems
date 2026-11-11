@@ -1,6 +1,3 @@
-// Package server implements the gRPC front end for a storage node. It serves
-// the StorageService API, forwards client requests to the current Raft leader,
-// and exposes the fragment transport used by the redundancy layer.
 package server
 
 import (
