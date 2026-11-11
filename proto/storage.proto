@@ -45,12 +45,22 @@ service StorageService {
 message PutRequest {
   string key = 1;
   bytes value = 2;
-  string mode = 3; // "replication" or "rs32"
+  string mode = 3; // "replication" or "rs32"; empty resolves from cluster config
+  // Optional compare-and-swap guard. Zero means no guard. A non-zero value must
+  // equal the currently stored version or the write is rejected as a conflict.
+  int64 expected_version = 4;
 }
 
 message PutResponse {
   bool success = 1;
   string message = 2;
+  // Identity and durability of the stripe created by a successful write.
+  string stripe_id = 3;
+  string mode = 4;
+  int64 version = 5;
+  bool degraded = 6;
+  int32 shards_stored = 7;
+  string checksum = 8;
 }
 
 message GetRequest {
