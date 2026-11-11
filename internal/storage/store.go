@@ -44,6 +44,8 @@ type Store interface {
 	GetFragment(stripeID string, shardIndex int) (Fragment, error)
 	DeleteFragment(stripeID string, shardIndex int) error
 	DeleteStripe(stripeID string) error
+	// ListFragments returns local fragment metadata ordered by stripe and shard
+	// index. An empty stripeID lists every local fragment.
 	ListFragments(stripeID string) ([]FragmentRef, error)
 
 	// Cluster config. ApplySetConfig is the FSM path; PutConfig is for seeding

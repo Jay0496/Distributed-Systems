@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -701,6 +702,188 @@ func TestDownloadHonorsCancellation(t *testing.T) {
 			return
 		}
 	}
+}
+
+func listFragmentInfos(t *testing.T, client pb.StorageServiceClient, stripeID string) ([]*pb.FragmentInfo, error) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	stream, err := client.ListFragments(ctx, &pb.ListFragmentsRequest{StripeId: stripeID})
+	if err != nil {
+		return nil, err
+	}
+
+	var infos []*pb.FragmentInfo
+	for {
+		info, err := stream.Recv()
+		if err == io.EOF {
+			return infos, nil
+		}
+		if err != nil {
+			return infos, err
+		}
+		infos = append(infos, info)
+	}
+}
+
+func TestDeleteFragmentIdempotent(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{}, store)
+
+	data := []byte("delete me")
+	if _, err := uploadFragment(t, client, "stripe-30", 0, false, data, len(data), false); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	resp, err := client.DeleteFragment(context.Background(), &pb.DeleteFragmentRequest{StripeId: "stripe-30", ShardIndex: 0})
+	if err != nil {
+		t.Fatalf("DeleteFragment: %v", err)
+	}
+	if !resp.GetSuccess() || resp.GetMessage() != "deleted" {
+		t.Fatalf("DeleteFragment = %+v", resp)
+	}
+	if _, err := store.GetFragment("stripe-30", 0); err == nil {
+		t.Fatal("fragment remains after delete")
+	}
+
+	resp, err = client.DeleteFragment(context.Background(), &pb.DeleteFragmentRequest{StripeId: "stripe-30", ShardIndex: 0})
+	if err != nil {
+		t.Fatalf("second DeleteFragment: %v", err)
+	}
+	if !resp.GetSuccess() || resp.GetMessage() != "absent" {
+		t.Fatalf("idempotent DeleteFragment = %+v", resp)
+	}
+
+	_, err = client.DeleteFragment(context.Background(), &pb.DeleteFragmentRequest{StripeId: "stripe-30", ShardIndex: 5})
+	requireCode(t, err, codes.InvalidArgument)
+
+	_, err = client.DeleteFragment(context.Background(), &pb.DeleteFragmentRequest{ShardIndex: 0})
+	requireCode(t, err, codes.InvalidArgument)
+}
+
+func TestDeleteStripeFragments(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{}, store)
+
+	for index := int32(0); index < 5; index++ {
+		data := []byte(fmt.Sprintf("shard-%d", index))
+		if _, err := uploadFragment(t, client, "stripe-31", index, index >= 3, data, len(data), false); err != nil {
+			t.Fatalf("upload shard %d: %v", index, err)
+		}
+	}
+	if refs, err := store.ListFragments("stripe-31"); err != nil || len(refs) != 5 {
+		t.Fatalf("seeded fragments = %d, %v; want 5", len(refs), err)
+	}
+
+	resp, err := client.DeleteStripeFragments(context.Background(), &pb.DeleteStripeFragmentsRequest{StripeId: "stripe-31"})
+	if err != nil {
+		t.Fatalf("DeleteStripeFragments: %v", err)
+	}
+	if !resp.GetSuccess() || resp.GetMessage() != "deleted 5 fragments" {
+		t.Fatalf("DeleteStripeFragments = %+v", resp)
+	}
+	if refs, err := store.ListFragments("stripe-31"); err != nil || len(refs) != 0 {
+		t.Fatalf("fragments remain after stripe delete: %d, %v", len(refs), err)
+	}
+
+	resp, err = client.DeleteStripeFragments(context.Background(), &pb.DeleteStripeFragmentsRequest{StripeId: "stripe-31"})
+	if err != nil {
+		t.Fatalf("second DeleteStripeFragments: %v", err)
+	}
+	if !resp.GetSuccess() || resp.GetMessage() != "absent" {
+		t.Fatalf("idempotent DeleteStripeFragments = %+v", resp)
+	}
+
+	_, err = client.DeleteStripeFragments(context.Background(), &pb.DeleteStripeFragmentsRequest{})
+	requireCode(t, err, codes.InvalidArgument)
+}
+
+func TestListFragmentsFiltersAndReportsMetadata(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{}, store)
+
+	if infos, err := listFragmentInfos(t, client, ""); err != nil || len(infos) != 0 {
+		t.Fatalf("empty store list = %d, %v; want 0", len(infos), err)
+	}
+
+	payloads := map[[2]any][]byte{}
+	for _, seed := range []struct {
+		stripe string
+		index  int32
+		parity bool
+		data   []byte
+	}{
+		{"stripe-32", 0, false, []byte("a0")},
+		{"stripe-32", 3, true, []byte("a3-parity")},
+		{"stripe-33", 1, false, []byte("b1")},
+	} {
+		if _, err := uploadFragment(t, client, seed.stripe, seed.index, seed.parity, seed.data, len(seed.data), false); err != nil {
+			t.Fatalf("upload %s/%d: %v", seed.stripe, seed.index, err)
+		}
+		payloads[[2]any{seed.stripe, seed.index}] = seed.data
+	}
+
+	all, err := listFragmentInfos(t, client, "")
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("list all returned %d fragments, want 3", len(all))
+	}
+	for i := 1; i < len(all); i++ {
+		previous, current := all[i-1], all[i]
+		if previous.GetStripeId() > current.GetStripeId() ||
+			(previous.GetStripeId() == current.GetStripeId() && previous.GetShardIndex() > current.GetShardIndex()) {
+			t.Fatalf("list all is not ordered: %+v", all)
+		}
+	}
+
+	filtered, err := listFragmentInfos(t, client, "stripe-32")
+	if err != nil {
+		t.Fatalf("list stripe-32: %v", err)
+	}
+	if len(filtered) != 2 {
+		t.Fatalf("filtered list returned %d fragments, want 2", len(filtered))
+	}
+	for _, info := range filtered {
+		if info.GetStripeId() != "stripe-32" {
+			t.Fatalf("filter leaked stripe %q", info.GetStripeId())
+		}
+		want := payloads[[2]any{"stripe-32", int32(info.GetShardIndex())}]
+		if info.GetSize() != int64(len(want)) || info.GetChecksum() != fragmentChecksum(want) {
+			t.Fatalf("fragment info = %+v, want size %d checksum %s", info, len(want), fragmentChecksum(want))
+		}
+		if info.GetIsParity() != (info.GetShardIndex() >= 3) {
+			t.Fatalf("fragment %d parity = %v", info.GetShardIndex(), info.GetIsParity())
+		}
+	}
+}
+
+func TestStatFragment(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{}, store)
+
+	data := []byte("stat me")
+	if _, err := uploadFragment(t, client, "stripe-34", 2, false, data, len(data), false); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	info, err := client.StatFragment(context.Background(), &pb.DeleteFragmentRequest{StripeId: "stripe-34", ShardIndex: 2})
+	if err != nil {
+		t.Fatalf("StatFragment: %v", err)
+	}
+	if info.GetStripeId() != "stripe-34" || info.GetShardIndex() != 2 ||
+		info.GetSize() != int64(len(data)) || info.GetChecksum() != fragmentChecksum(data) || info.GetIsParity() {
+		t.Fatalf("StatFragment = %+v", info)
+	}
+
+	_, err = client.StatFragment(context.Background(), &pb.DeleteFragmentRequest{StripeId: "stripe-34", ShardIndex: 4})
+	requireCode(t, err, codes.NotFound)
+
+	_, err = client.StatFragment(context.Background(), &pb.DeleteFragmentRequest{StripeId: "stripe-34", ShardIndex: 9})
+	requireCode(t, err, codes.InvalidArgument)
 }
 
 func TestRepairScaffold(t *testing.T) {

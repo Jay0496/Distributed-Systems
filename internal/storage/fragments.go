@@ -179,19 +179,25 @@ func (s *SQLiteStore) DeleteStripe(stripeID string) error {
 	return nil
 }
 
-// ListFragments returns fragment metadata for a stripe without loading payload
-// bytes. Results are ordered by shard index.
+// ListFragments returns fragment metadata without loading payload bytes. An
+// empty stripe ID lists every local fragment; a non-empty one filters to that
+// stripe. Results are ordered by stripe then shard index.
 func (s *SQLiteStore) ListFragments(stripeID string) ([]FragmentRef, error) {
 	if err := s.ready(); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(stripeID) == "" {
-		return nil, errors.New("stripe ID must not be empty")
-	}
 
-	rows, err := s.db.QueryContext(context.Background(), `
-		SELECT shard_index, is_parity, length(data), checksum, created_at
-		FROM fragments WHERE stripe_id = ? ORDER BY shard_index`, stripeID)
+	query := `
+		SELECT stripe_id, shard_index, is_parity, length(data), checksum, created_at
+		FROM fragments`
+	args := make([]any, 0, 1)
+	if strings.TrimSpace(stripeID) != "" {
+		query += ` WHERE stripe_id = ?`
+		args = append(args, stripeID)
+	}
+	query += ` ORDER BY stripe_id, shard_index`
+
+	rows, err := s.db.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list fragments for stripe %q: %w", stripeID, err)
 	}
@@ -199,12 +205,12 @@ func (s *SQLiteStore) ListFragments(stripeID string) ([]FragmentRef, error) {
 
 	var fragments []FragmentRef
 	for rows.Next() {
-		ref := FragmentRef{StripeID: stripeID}
 		var (
+			ref       FragmentRef
 			isParity  int
 			createdAt string
 		)
-		if err := rows.Scan(&ref.ShardIndex, &isParity, &ref.Size, &ref.Checksum, &createdAt); err != nil {
+		if err := rows.Scan(&ref.StripeID, &ref.ShardIndex, &isParity, &ref.Size, &ref.Checksum, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan fragment for stripe %q: %w", stripeID, err)
 		}
 		ref.IsParity = isParity == 1

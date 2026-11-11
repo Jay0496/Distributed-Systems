@@ -325,6 +325,138 @@ func (s *Server) DownloadFragment(req *pb.FragmentRequest, stream pb.StorageServ
 	return nil
 }
 
+// validateStripeID rejects an empty stripe ID for operations that require one.
+func validateStripeID(stripeID string) error {
+	if strings.TrimSpace(stripeID) == "" {
+		return status.Error(codes.InvalidArgument, "fragment stripe_id is required")
+	}
+	return nil
+}
+
+// DeleteFragment removes one local fragment. Deleting a missing fragment
+// succeeds with message "absent" so repair and garbage collection are
+// idempotent.
+func (s *Server) DeleteFragment(ctx context.Context, req *pb.DeleteFragmentRequest) (*pb.FragmentOpResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	if err := validateFragmentID(req.GetStripeId(), req.GetShardIndex()); err != nil {
+		return nil, err
+	}
+
+	stripeID := req.GetStripeId()
+	shardIndex := int(req.GetShardIndex())
+	refs, err := s.store.ListFragments(stripeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "look up fragment %s/%d: %v", stripeID, shardIndex, err)
+	}
+	present := false
+	for _, ref := range refs {
+		if ref.ShardIndex == shardIndex {
+			present = true
+			break
+		}
+	}
+
+	if err := s.store.DeleteFragment(stripeID, shardIndex); err != nil {
+		return nil, status.Errorf(codes.Internal, "delete fragment %s/%d: %v", stripeID, shardIndex, err)
+	}
+	if !present {
+		return &pb.FragmentOpResponse{Success: true, Message: "absent"}, nil
+	}
+	return &pb.FragmentOpResponse{Success: true, Message: "deleted"}, nil
+}
+
+// DeleteStripeFragments removes every local fragment for a stripe. It is used
+// by overwrite garbage collection and is idempotent.
+func (s *Server) DeleteStripeFragments(ctx context.Context, req *pb.DeleteStripeFragmentsRequest) (*pb.FragmentOpResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	if err := validateStripeID(req.GetStripeId()); err != nil {
+		return nil, err
+	}
+
+	stripeID := req.GetStripeId()
+	refs, err := s.store.ListFragments(stripeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list fragments for %s: %v", stripeID, err)
+	}
+	for _, ref := range refs {
+		if err := s.store.DeleteFragment(stripeID, ref.ShardIndex); err != nil {
+			return nil, status.Errorf(codes.Internal,
+				"delete fragment %s/%d: %v", stripeID, ref.ShardIndex, err)
+		}
+	}
+	if len(refs) == 0 {
+		return &pb.FragmentOpResponse{Success: true, Message: "absent"}, nil
+	}
+	return &pb.FragmentOpResponse{
+		Success: true,
+		Message: fmt.Sprintf("deleted %d fragments", len(refs)),
+	}, nil
+}
+
+// ListFragments streams local fragment references, filtered by stripe when the
+// request supplies one. Payload bytes are never loaded.
+func (s *Server) ListFragments(req *pb.ListFragmentsRequest, stream pb.StorageService_ListFragmentsServer) error {
+	if req.GetStripeId() != "" {
+		if err := validateStripeID(req.GetStripeId()); err != nil {
+			return err
+		}
+	}
+
+	refs, err := s.store.ListFragments(req.GetStripeId())
+	if err != nil {
+		return status.Errorf(codes.Internal, "list fragments: %v", err)
+	}
+
+	for _, ref := range refs {
+		if err := stream.Context().Err(); err != nil {
+			return status.FromContextError(err).Err()
+		}
+		if err := stream.Send(fragmentInfo(ref)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// StatFragment reports the size and checksum of one local fragment without
+// streaming its payload.
+func (s *Server) StatFragment(ctx context.Context, req *pb.DeleteFragmentRequest) (*pb.FragmentInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	if err := validateFragmentID(req.GetStripeId(), req.GetShardIndex()); err != nil {
+		return nil, err
+	}
+
+	stripeID := req.GetStripeId()
+	shardIndex := int(req.GetShardIndex())
+	refs, err := s.store.ListFragments(stripeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "look up fragment %s/%d: %v", stripeID, shardIndex, err)
+	}
+	for _, ref := range refs {
+		if ref.ShardIndex == shardIndex {
+			return fragmentInfo(ref), nil
+		}
+	}
+	return nil, status.Errorf(codes.NotFound, "fragment %s/%d not found", stripeID, shardIndex)
+}
+
+// fragmentInfo converts a stored reference to its wire representation.
+func fragmentInfo(ref storage.FragmentRef) *pb.FragmentInfo {
+	return &pb.FragmentInfo{
+		StripeId:   ref.StripeID,
+		ShardIndex: int32(ref.ShardIndex),
+		IsParity:   ref.IsParity,
+		Size:       ref.Size,
+		Checksum:   ref.Checksum,
+	}
+}
+
 // Repair is the entry point for the failure-management subsystem. It is a
 // deliberate scaffold: reconstruction and rebalancing land with that subsystem.
 func (s *Server) Repair(ctx context.Context, req *pb.RepairRequest) (*pb.RepairResponse, error) {
