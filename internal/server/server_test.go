@@ -32,6 +32,7 @@ type testNode struct {
 	transport *raft.InmemTransport
 	store     *testStore
 	node      *consensus.Node
+	srv       *Server
 
 	lis     *bufconn.Listener
 	grpcSrv *grpc.Server
@@ -46,6 +47,7 @@ type testNode struct {
 type testCluster struct {
 	nodes []*testNode
 	byID  map[string]*testNode
+	dial  dialFunc
 }
 
 // newTestCluster starts n Raft nodes (node1 bootstraps the full configuration)
@@ -107,6 +109,7 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 			grpc.WithBlock(),
 		)
 	}
+	c.dial = dial
 
 	// 3. Start Raft.
 	servers := make([]raft.Server, 0, n)
@@ -135,7 +138,9 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 			Peers:   peers,
 		}
 		grpcSrv := grpc.NewServer()
-		pb.RegisterStorageServiceServer(grpcSrv, New(cfg, tn.store, tn.node, dial))
+		srv := New(cfg, tn.store, tn.node, dial)
+		pb.RegisterStorageServiceServer(grpcSrv, srv)
+		tn.srv = srv
 
 		hs := health.NewServer()
 		hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
@@ -268,26 +273,65 @@ func waitForValue(t *testing.T, cluster *testCluster, key, want string) {
 	t.Fatalf("timed out waiting for %q=%q: %s", key, want, lastMsg)
 }
 
+// waitForMetaVersion polls every node until the committed metadata for key has
+// the expected version. Metadata applies asynchronously on followers, so the
+// test cannot assume it is visible when the leader's Put returns.
+func waitForMetaVersion(t *testing.T, cluster *testCluster, key string, version int64) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		ok := true
+		for _, tn := range cluster.nodes {
+			meta, err := tn.store.GetKey(key)
+			if err != nil {
+				last = fmt.Sprintf("%s: %v", tn.id, err)
+				ok = false
+				continue
+			}
+			if meta.Version != version {
+				last = fmt.Sprintf("%s: version %d", tn.id, meta.Version)
+				ok = false
+			}
+		}
+		if ok {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for metadata %q version %d: %s", key, version, last)
+}
+
 // TestServerConsensusRPCs covers the write path, forwarding, linearizable
 // reads, NodeStatus agreement, the health service, and the forwarding loop
 // guard against one live 3-node cluster.
 func TestServerConsensusRPCs(t *testing.T) {
-	c := newTestCluster(t, 3)
+	c := newTestCluster(t, 5)
 	leader := c.waitLeader(t)
 	follower := c.waitFollower(t)
 	t.Logf("leader=%s follower=%s", leader.id, follower.id)
 
 	t.Run("leader accepts writes", func(t *testing.T) {
 		mustPut(t, leader.client, "leader-key", "leader-value", "")
+		waitForMetaVersion(t, c, "leader-key", 1)
 	})
 
 	t.Run("follower forwards writes", func(t *testing.T) {
 		mustPut(t, follower.client, "forwarded-key", "forwarded-value", "replication")
+		waitForMetaVersion(t, c, "forwarded-key", 1)
 	})
 
-	t.Run("linearizable reads on every node", func(t *testing.T) {
-		waitForValue(t, c, "leader-key", "leader-value")
-		waitForValue(t, c, "forwarded-key", "forwarded-value")
+	t.Run("legacy reads still forward to the leader", func(t *testing.T) {
+		// Task 06 removes payloads from the write path, but Get still serves
+		// the legacy key space until task 07 replaces it. Seed that key space
+		// directly and verify every node's forwarding path.
+		for _, tn := range c.nodes {
+			if err := tn.store.Put("legacy-key", []byte("legacy-value"), false); err != nil {
+				t.Fatalf("%s seed legacy value: %v", tn.id, err)
+			}
+		}
+		waitForValue(t, c, "legacy-key", "legacy-value")
 	})
 
 	t.Run("missing key is reported as not found", func(t *testing.T) {
@@ -461,7 +505,7 @@ func TestServerJoin(t *testing.T) {
 // TestServerModeValidation checks that only documented redundancy modes are
 // accepted and that invalid modes never reach Raft.
 func TestServerModeValidation(t *testing.T) {
-	c := newTestCluster(t, 1)
+	c := newTestCluster(t, 5)
 	leader := c.waitLeader(t)
 
 	for _, mode := range []string{"", "replication", "rs32"} {
@@ -489,5 +533,3 @@ func TestServerModeValidation(t *testing.T) {
 		t.Fatal("invalid mode rejection did not explain itself")
 	}
 }
-
-

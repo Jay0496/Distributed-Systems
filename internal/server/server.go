@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -64,11 +63,17 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 	return srv
 }
 
-// Put validates the redundancy mode, forwards to the leader when necessary, and
-// commits the write through Raft.
+// Put validates the request, forwards to the leader when necessary, and runs
+// the metadata-only write path on the leader. Application failures (validation,
+// quorum, conflict, commit rejection, ambiguous commit) return success=false
+// with a message; gRPC errors are reserved for transport-level failures.
 func (s *Server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
-	if _, err := redundancy.ParseMode(req.GetMode()); err != nil {
-		return &pb.PutResponse{Success: false, Message: err.Error()}, nil
+	if err := validatePut(req.GetKey(), req.GetValue(), req.GetMode(), req.GetExpectedVersion(), s.cfg.MaxValueSize); err != nil {
+		return writeFailed("%v", err), nil
+	}
+
+	if s.node == nil || s.node.Raft == nil {
+		return writeFailed("raft node is not configured"), nil
 	}
 
 	// Followers transparently forward writes to the current leader.
@@ -76,33 +81,7 @@ func (s *Server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, 
 		return s.forwardPut(ctx, req)
 	}
 
-	// Wrap the request in a Raft command. The full value still travels through
-	// the log until task 06 installs the metadata-only write path.
-	// TODO(task 06): encode the value, push fragments, and commit only metadata.
-	cmd := consensus.Command{
-		Op: consensus.OpPut,
-		Legacy: &consensus.LegacyOp{
-			Key:   req.GetKey(),
-			Value: req.GetValue(),
-		},
-	}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return &pb.PutResponse{Success: false, Message: err.Error()}, nil
-	}
-
-	// Replicate the command through Raft and wait for consensus.
-	future := s.node.Raft.Apply(data, 10*time.Second)
-	if err := future.Error(); err != nil {
-		return &pb.PutResponse{Success: false, Message: err.Error()}, nil
-	}
-
-	// Check whether the FSM returned an error while applying.
-	if applyErr := future.Response(); applyErr != nil {
-		return &pb.PutResponse{Success: false, Message: fmt.Sprintf("%v", applyErr)}, nil
-	}
-
-	return &pb.PutResponse{Success: true, Message: "Consensus reached and stored successfully"}, nil
+	return s.write(ctx, req)
 }
 
 // Get forwards to the leader when necessary and serves a linearizable read from

@@ -17,8 +17,6 @@ import (
 	"distributed-kv-store/internal/storage"
 
 	pb "distributed-kv-store/proto"
-
-	"github.com/hashicorp/raft"
 )
 
 // errVersionConflict reports that the stored version did not match the
@@ -219,17 +217,121 @@ func engineFor(mode redundancy.Mode) (redundancy.Engine, error) {
 	}
 }
 
-// raftErrIsAmbiguous reports whether a failed Apply proves the entry did not
-// commit. Any error means the outcome is unknown, so callers must not delete
-// fragments that the committed metadata might reference.
-func raftErrIsAmbiguous(err error) bool {
-	if err == nil {
-		return false
+// maxWriteAttempts bounds the retry after a lost metadata version race. A
+// second conflict is reported to the caller instead of looping.
+const maxWriteAttempts = 2
+
+// commitMetadata marshals a metadata-only put_meta command and applies it
+// through Raft. The returned result may carry an application rejection; an
+// error means the commit outcome is ambiguous and fragments must be retained.
+func (s *Server) commitMetadata(intent *writeIntent, placements []storage.ShardPlacement, degraded bool) (*consensus.Result, error) {
+	meta := storage.KeyMeta{
+		Key:       intent.key,
+		StripeID:  intent.stripeID,
+		Mode:      intent.mode.String(),
+		Size:      int64(len(intent.value)),
+		Checksum:  redundancy.Checksum(intent.value),
+		Version:   intent.version,
+		Degraded:  degraded,
+		Placement: placements,
 	}
-	// ErrNotLeader and ErrLeadershipLost are ambiguous: the entry may have
-	// replicated before leadership changed.
-	if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) {
-		return true
+	data, err := marshalCommand(consensus.Command{Op: consensus.OpPutMeta, Key: intent.key, Meta: &meta})
+	if err != nil {
+		return nil, err
 	}
-	return true
+
+	response, err := s.apply(data, s.cfg.WriteTimeout)
+	if err != nil {
+		// Ambiguous: the entry may have committed. Never delete the new stripe
+		// here; the task 09 orphan sweep handles fragments that no metadata
+		// references.
+		return nil, err
+	}
+	result, ok := response.(*consensus.Result)
+	if !ok || result == nil {
+		return nil, fmt.Errorf("unexpected put_meta response %T", response)
+	}
+	return result, nil
+}
+
+// write executes the leader-side write path: resolve identity, encode, push
+// fragments, commit metadata, then asynchronously garbage-collect the old
+// stripe. Application failures are returned as success=false responses;
+// transport failures are reserved for forwarding.
+func (s *Server) write(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
+	for attempt := 0; attempt < maxWriteAttempts; attempt++ {
+		intent, err := s.newWriteIntent(ctx, req)
+		if err != nil {
+			if errors.Is(err, errVersionConflict) {
+				return writeFailed("metadata version conflict: expected_version does not match the stored version"), nil
+			}
+			return writeFailed("prepare write: %v", err), nil
+		}
+
+		shards, placements, err := s.encodeAndPlace(intent)
+		if err != nil {
+			return writeFailed("prepare write: %v", err), nil
+		}
+
+		stored := s.pushShards(ctx, intent.stripeID, shards, placements)
+		if len(stored) < writeQuorum {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), gcTimeout)
+			s.deleteStripeFragments(cleanupCtx, intent.stripeID, stored)
+			cancel()
+			return writeFailed("only %d of %d shards were stored; quorum is %d",
+				len(stored), redundancy.TotalShards, writeQuorum), nil
+		}
+
+		degraded := len(stored) < redundancy.TotalShards
+		result, err := s.commitMetadata(intent, placements, degraded)
+		if err != nil {
+			return writeFailed("metadata commit outcome is unknown: %v", err), nil
+		}
+
+		if result.Err != "" {
+			// A typed rejection proves the entry was not applied. Remove the
+			// fragments this attempt stored so a failed write leaves no stripe
+			// behind.
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), gcTimeout)
+			s.deleteStripeFragments(cleanupCtx, intent.stripeID, stored)
+			cancel()
+
+			if result.Err == consensus.ResultErrConflict {
+				if req.GetExpectedVersion() != 0 {
+					return writeFailed("metadata version conflict: expected_version %d no longer matches", req.GetExpectedVersion()), nil
+				}
+				if attempt+1 < maxWriteAttempts {
+					continue
+				}
+				return writeFailed("metadata version conflict after %d attempts", maxWriteAttempts), nil
+			}
+			return writeFailed("metadata commit rejected: %s", result.Err), nil
+		}
+
+		s.garbageCollectOldStripe(intent.stripeID, result.OldMeta)
+
+		message := "write committed"
+		if degraded {
+			message = fmt.Sprintf("write committed with degraded redundancy (%d of %d shards stored)", len(stored), redundancy.TotalShards)
+		}
+		return &pb.PutResponse{
+			Success:      true,
+			Message:      message,
+			StripeId:     intent.stripeID,
+			Mode:         intent.mode.String(),
+			Version:      intent.version,
+			Degraded:     degraded,
+			ShardsStored: int32(len(stored)),
+			Checksum:     redundancy.Checksum(intent.value),
+		}, nil
+	}
+
+	return writeFailed("metadata version conflict"), nil
+}
+
+// writeFailed builds the response shape used for expected application errors.
+// gRPC errors are reserved for transport-level failures such as a broken
+// forward, so callers keep seeing success=false plus a message.
+func writeFailed(format string, args ...interface{}) *pb.PutResponse {
+	return &pb.PutResponse{Success: false, Message: fmt.Sprintf(format, args...)}
 }
