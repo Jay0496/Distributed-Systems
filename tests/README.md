@@ -58,6 +58,7 @@ docker run --rm --network distributed-systems_cluster-net -v "${PWD}:/app" -w /a
 | --- | --- | --- | --- |
 | `tests/unit/config/` | unit | black box (`config_test`) | Env-driven config parsing |
 | `tests/unit/storage/` | unit | black box (`storage_test`) | Schema, metadata, fragments, stats, snapshots, factory, support `MockStore` |
+| `tests/unit/redundancy/` | unit | black box (`redundancy_test`) | RS(3,2) round trips, every two-shard loss, replication copies, corruption, placement, storage math |
 | `tests/cluster_test.go` | integration | black box (`tests`) | Five-node Compose cluster; moves under `tests/integration` in task 12 |
 | `internal/server/server_test.go` | component | white box (`server`) | In-process Raft + `bufconn`; uses unexported forwarding/fragment helpers |
 | `internal/consensus/fsm_test.go` | unit | white box (`consensus`) | FSM command handling and snapshots |
@@ -81,13 +82,12 @@ a test.
 | `internal/storage/sqlite_test.go` | SQLite helper functions `InitDB`, `SaveChunk`, `GetChunk` |
 | `internal/gateway/router_test.go` | `Router.nodes` and `Router.ring` |
 
-`tests/unit/config` is deliberately black box: it exercises only `config.Load`
-and `config.Config`, which are the exported seam.
+`tests/unit/config` and `tests/unit/redundancy` are deliberately black box: they
+exercise only exported seams (`config.Load`/`config.Config` and the redundancy
+engines, shard, checksum, and placer APIs).
 
 ## Temporary production exceptions
 
-- `internal/redundancy.NoopRedundancy` is a pass-through placeholder. It is
-  replaced by the real Reed-Solomon/replication engine in the redundancy task.
 - The legacy full-value `store` table remains until task 06 switches the write
   path to metadata plus fragments; task 15 removes it. The in-memory `MockStore`
   lives only under `tests/support` and is not imported by production packages.

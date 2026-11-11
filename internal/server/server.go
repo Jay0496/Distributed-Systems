@@ -30,14 +30,13 @@ type Server struct {
 	store storage.Store
 	node  *consensus.Node
 	cfg   config.Config
-	redun redundancy.RedundancyEngine
 
 	connMu sync.Mutex
 	conns  map[string]*grpc.ClientConn
 	dial   dialFunc
 }
 
-// New builds a Server with its connection cache and redundancy hook.
+// New builds a Server with its connection cache and dialer.
 // A nil dial uses the production gRPC dialer.
 func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dialFunc) *Server {
 	if dial == nil {
@@ -47,7 +46,6 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 		store: store,
 		node:  node,
 		cfg:   cfg,
-		redun: redundancy.NewNoopRedundancy(),
 		conns: make(map[string]*grpc.ClientConn),
 		dial:  dial,
 	}
@@ -56,7 +54,7 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 // Put validates the redundancy mode, forwards to the leader when necessary, and
 // commits the write through Raft.
 func (s *Server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
-	if err := redundancy.ValidateMode(req.GetMode()); err != nil {
+	if _, err := redundancy.ParseMode(req.GetMode()); err != nil {
 		return &pb.PutResponse{Success: false, Message: err.Error()}, nil
 	}
 
