@@ -65,11 +65,21 @@ message PutResponse {
 
 message GetRequest {
   string key = 1;
+  // Optional read hint. The server always uses the mode recorded in committed
+  // metadata, so this field does not affect correctness.
+  string mode = 2;
 }
 
 message GetResponse {
   bool success = 1;
   bytes value = 2;
+  // Details of the stripe that served the read.
+  string mode = 3;
+  string stripe_id = 4;
+  int64 version = 5;
+  int32 shards_used = 6;
+  bool repaired = 7;
+  string checksum = 8;
 }
 
 message HeartbeatRequest {
