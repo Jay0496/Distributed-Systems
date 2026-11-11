@@ -268,10 +268,108 @@ compaction (`Snapshot()`) bounds the disk usage.
 | --- | --- |
 | `Join` | Leader adds the caller via `AddVoter`. A follower returns `success=false` plus `leader_id` so the caller can retry against the leader. |
 | `NodeStatus` | Reports `node_id`, `state`, `leader_id`, `leader_addr`, `term`, `commit_index`, `applied_index`, `last_index`. |
-| `UploadFragment` | Consumes a chunk stream and stores each chunk under `key#dN` / `key#pN`. |
-| `DownloadFragment` | Looks up the chunk by key and index and streams it back. |
+| `UploadFragment` | Stages a stripe-addressed chunk stream, verifies its checksum, and commits it atomically. See [Fragment transport v2](#fragment-transport-v2). |
+| `DownloadFragment` | Verifies the stored checksum and streams the fragment in bounded chunks. |
+| `DeleteFragment` | Idempotently deletes one local fragment. |
+| `DeleteStripeFragments` | Deletes every local fragment for a stripe (overwrite GC). |
+| `ListFragments` | Streams local fragment metadata, optionally filtered by stripe. |
+| `StatFragment` | Reports fragment size and checksum without a payload. |
 | `Repair` | Validates the key and returns a scaffold message; reconstruction belongs to the failure-management subsystem. |
 | `Heartbeat` | Legacy liveness RPC. Real health checks use `grpc.health.v1`. |
+
+## Fragment transport v2
+
+The redundancy layer moves shards out of band: Raft carries metadata only, and
+each node receives its own fragment through `UploadFragment`. A fragment is
+identified by `(stripe_id, shard_index)`; the stripe ID is opaque and shard
+indices are global.
+
+| Shard index | RS(3,2) | Replication |
+| --- | --- | --- |
+| 0, 1, 2 | data shards | full copies |
+| 3, 4 | parity shards | full copies |
+
+The transport does not know the stripe's mode, so it derives only what is
+unambiguous: indices 0-2 can never be marked parity. Indices 3-4 carry the
+sender's `is_parity` flag, which is true for RS parity shards and false for
+replication copies.
+
+### Upload
+
+```mermaid
+sequenceDiagram
+    participant C as Sender
+    participant S as UploadFragment
+    participant G as Staging
+    participant D as SQLite fragments
+
+    C->>S: chunk(stripe, shard, offset=0, total, checksum, data)
+    S->>G: begin (reject concurrent same identity)
+    S->>G: append + validate contiguous offset
+    C->>S: more chunks (same identity, total, checksum, replace, parity)
+    S->>G: append
+    C->>S: chunk(last=true)
+    S->>S: size == total_size, SHA-256 == checksum
+    S->>D: PutFragment (atomic upsert)
+    S->>G: release
+    S-->>C: success
+```
+
+1. The first chunk validates `stripe_id`, `shard_index` (0-4), `total_size`
+   (`0..MAX_FRAGMENT_SIZE`), checksum format, and `offset == 0`.
+2. Chunks accumulate in a staging slot keyed by `(stripe_id, shard_index)`.
+   Every chunk must repeat the same identity, total size, checksum, `replace`,
+   and `is_parity`. Each offset must equal the current buffer length; gaps,
+   overlaps, and duplicate offsets return `InvalidArgument`.
+3. A concurrent upload for the same identity returns `Aborted`; the winner
+   keeps the slot. At most 64 fragments are staged per node; further uploads
+   return `ResourceExhausted`.
+4. On `last=true` the buffer must equal `total_size` and its SHA-256 must equal
+   the checksum before `PutFragment` is called. Staging is released on success
+   and on every error path.
+5. If the fragment already exists with the same checksum, the upload succeeds
+   without rewriting (retry-safe). A different checksum returns
+   `AlreadyExists` unless `replace=true`, which is reserved for repair.
+6. An upload whose stream closes without `last=true`, or that changes any
+   repeated field, is rejected and leaves no fragment behind.
+
+`total_size` is the fragment payload size, not the original value size. An
+empty replication copy is one zero-length chunk with the SHA-256 of the empty
+string. RS shards are never zero-length because encoding uses
+`shardSize = max(1, ceil(size/3))`.
+
+### Download
+
+Download requires `(stripe_id, shard_index)` and ignores the legacy fields. The
+server verifies the stored checksum, then streams `UPLOAD_CHUNK_SIZE` pieces.
+Each message repeats the total size and checksum, carries its byte offset, and
+sets `last=true` on the final piece. A zero-length fragment produces exactly one
+message with `offset=0`, `total_size=0`, the empty-string checksum, and
+`last=true`. Missing fragments return `NotFound`; a stored checksum mismatch
+returns `Internal`.
+
+### Maintenance
+
+`DeleteFragment` is idempotent and reports `absent` for a missing fragment.
+`DeleteStripeFragments` removes every local fragment for a stripe and reports
+how many it removed. `ListFragments` streams metadata only; an empty
+`stripe_id` lists every local fragment, which repair uses to detect missing
+shards. `StatFragment` returns size and checksum without transferring payload
+bytes. The transport never decides whether a stripe is current; superseded
+stripe cleanup belongs to metadata garbage collection.
+
+### Limits and compatibility
+
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `MAX_FRAGMENT_SIZE` | `64MiB` | Largest complete fragment payload. |
+| `MAX_MESSAGE_SIZE` | `32MiB` | Largest single gRPC request or response; applied to the server and forwarding dials. |
+| `UPLOAD_CHUNK_SIZE` | `1MiB` | Preferred chunk size for uploads and the download chunk size. |
+| `FRAGMENT_TIMEOUT` | `10s` | Deadline for one upload, download, delete, list, or stat operation. |
+
+The legacy `key`, `index`, and `is_parity` request fields and their field
+numbers remain in the proto so old clients compile and old messages decode.
+V2 handlers ignore `key`/`index` and reject a request without `stripe_id`.
 
 ## Raft configuration
 
@@ -315,8 +413,10 @@ the FSM still writes the legacy `store` table, so the envelope also carries a
 legacy section. Restore applies both sections in one transaction and still
 accepts version 1 snapshots and the pre-SQLite raw map.
 
-The `fragments` table exists now but the server does not write it until the
-write path is integrated in task 06.
+The `fragments` table is written by the fragment transport v2 upload handler.
+The client write path does not call that handler until task 06 wires the
+redundancy engines into `Put`; until then fragments are only created by direct
+transport calls and tests.
 
 ## Consistency model
 
@@ -360,8 +460,10 @@ in [DECISIONS.md](DECISIONS.md) (ADR-001).
   command in the `store` table. Metadata commands, validation, idempotency, and
   snapshots are implemented; task 06 wires them into the write path and task 07
   into reads.
-- Local fragments are not written by the server until the write path is
-  integrated, although the SQLite tables and repository APIs exist.
+- The write and read paths do not call the fragment transport yet; task 06
+  wires uploads into `Put` and task 07 wires downloads into `Get`. Fragments are
+  only written to the `fragments` table when the transport is called directly,
+  for example by tests or repair paths.
 - `x-kv-forwarded` prevents loops but assumes `PEERS` is complete and correct.
 - Reads append log entries (no read-index optimisation yet).
 - The redundancy engines and placement are implemented and unit-tested, but the

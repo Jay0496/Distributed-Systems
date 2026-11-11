@@ -38,7 +38,15 @@ func newDialFunc(cfg config.Config) dialFunc {
 		} else {
 			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		}
-		opts = append(opts, grpc.WithBlock())
+		// Keep both call-size limits aligned with the server. Without these the
+		// gRPC 4 MiB default would cap forwarded values and fragment chunks.
+		opts = append(opts,
+			grpc.WithDefaultCallOptions(
+				grpc.MaxCallRecvMsgSize(cfg.MaxMessageSize),
+				grpc.MaxCallSendMsgSize(cfg.MaxMessageSize),
+			),
+			grpc.WithBlock(),
+		)
 		return grpc.DialContext(ctx, target, opts...)
 	}
 }

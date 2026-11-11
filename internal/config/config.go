@@ -7,8 +7,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+)
+
+// Fragment transport defaults. MAX_FRAGMENT_SIZE bounds one complete
+// fragment, MAX_MESSAGE_SIZE bounds one gRPC message, UPLOAD_CHUNK_SIZE is the
+// chunk size clients use (and the server uses when streaming downloads), and
+// FRAGMENT_TIMEOUT bounds one upload or download operation.
+const (
+	DefaultMaxFragmentSize = 64 << 20
+	DefaultMaxMessageSize  = 32 << 20
+	DefaultUploadChunkSize = 1 << 20
+	DefaultFragmentTimeout = 10 * time.Second
 )
 
 // Config holds the runtime configuration for a single storage node.
@@ -29,6 +41,16 @@ type Config struct {
 	// StoreBusyTimeout bounds SQLite lock waits.
 	StoreBusyTimeout time.Duration
 
+	// MaxFragmentSize bounds one complete fragment payload (default 64 MiB).
+	MaxFragmentSize int
+	// MaxMessageSize bounds one gRPC request or response (default 32 MiB).
+	MaxMessageSize int
+	// UploadChunkSize is the fragment chunk size used by clients and by
+	// streaming downloads (default 1 MiB).
+	UploadChunkSize int
+	// FragmentTimeout bounds one upload or download operation (default 10s).
+	FragmentTimeout time.Duration
+
 	// BootstrapServers maps Raft server ID -> Raft address.
 	BootstrapServers map[string]string
 	// Peers maps Raft server ID -> gRPC address.
@@ -46,6 +68,10 @@ func Load() Config {
 		DataDir:          dataDir,
 		StorePath:        envOr("STORE_PATH", filepath.Join(dataDir, "node.db")),
 		StoreBusyTimeout: durationOr("STORE_BUSY_TIMEOUT", 5*time.Second),
+		MaxFragmentSize:  intOr("MAX_FRAGMENT_SIZE", DefaultMaxFragmentSize),
+		MaxMessageSize:   intOr("MAX_MESSAGE_SIZE", DefaultMaxMessageSize),
+		UploadChunkSize:  intOr("UPLOAD_CHUNK_SIZE", DefaultUploadChunkSize),
+		FragmentTimeout:  durationOr("FRAGMENT_TIMEOUT", DefaultFragmentTimeout),
 		Bootstrap:        os.Getenv("BOOTSTRAP") == "true",
 		JoinAddr:         os.Getenv("JOIN_ADDR"),
 		TLSEnabled:       os.Getenv("TLS_ENABLED") == "true",
@@ -58,11 +84,43 @@ func Load() Config {
 	return cfg
 }
 
+// WithDefaults fills unset fragment transport limits with their documented
+// defaults. It lets callers that construct Config directly, including tests,
+// rely on the same limits as a process started through Load.
+func (c Config) WithDefaults() Config {
+	if c.MaxFragmentSize <= 0 {
+		c.MaxFragmentSize = DefaultMaxFragmentSize
+	}
+	if c.MaxMessageSize <= 0 {
+		c.MaxMessageSize = DefaultMaxMessageSize
+	}
+	if c.UploadChunkSize <= 0 {
+		c.UploadChunkSize = DefaultUploadChunkSize
+	}
+	if c.FragmentTimeout <= 0 {
+		c.FragmentTimeout = DefaultFragmentTimeout
+	}
+	return c
+}
+
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return fallback
+}
+
+func intOr(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		fmt.Fprintf(os.Stderr, "invalid %s %q, using %d\n", key, raw, fallback)
+		return fallback
+	}
+	return value
 }
 
 func durationOr(key string, fallback time.Duration) time.Duration {

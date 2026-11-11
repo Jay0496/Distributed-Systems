@@ -298,7 +298,8 @@ func (m *MockStore) DeleteStripe(stripeID string) error {
 	return nil
 }
 
-// ListFragments returns fragment metadata for a stripe.
+// ListFragments returns fragment metadata for a stripe, or every local
+// fragment when stripeID is empty.
 func (m *MockStore) ListFragments(stripeID string) ([]storage.FragmentRef, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -306,18 +307,28 @@ func (m *MockStore) ListFragments(stripeID string) ([]storage.FragmentRef, error
 		return nil, err
 	}
 
-	refs := make([]storage.FragmentRef, 0, len(m.fragments[stripeID]))
-	for _, frag := range m.fragments[stripeID] {
-		refs = append(refs, storage.FragmentRef{
-			StripeID:   frag.StripeID,
-			ShardIndex: frag.ShardIndex,
-			IsParity:   frag.IsParity,
-			Size:       int64(len(frag.Data)),
-			Checksum:   frag.Checksum,
-			CreatedAt:  frag.CreatedAt,
-		})
+	var refs []storage.FragmentRef
+	for id, shards := range m.fragments {
+		if stripeID != "" && id != stripeID {
+			continue
+		}
+		for _, frag := range shards {
+			refs = append(refs, storage.FragmentRef{
+				StripeID:   id,
+				ShardIndex: frag.ShardIndex,
+				IsParity:   frag.IsParity,
+				Size:       int64(len(frag.Data)),
+				Checksum:   frag.Checksum,
+				CreatedAt:  frag.CreatedAt,
+			})
+		}
 	}
-	sort.Slice(refs, func(i, j int) bool { return refs[i].ShardIndex < refs[j].ShardIndex })
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].StripeID != refs[j].StripeID {
+			return refs[i].StripeID < refs[j].StripeID
+		}
+		return refs[i].ShardIndex < refs[j].ShardIndex
+	})
 	return refs, nil
 }
 

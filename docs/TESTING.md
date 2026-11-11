@@ -13,13 +13,15 @@ On macOS/Linux, replace `${PWD}` with `$(pwd)`.
 
 | File | Level | What it covers | Needs Compose? |
 | --- | --- | --- | --- |
-| `tests/unit/config/config_test.go` | unit | defaults, env overrides, store path/busy timeout, peer-map parsing, malformed entries, whitespace | no |
+| `tests/unit/config/config_test.go` | unit | defaults, env overrides, store path/busy timeout, fragment size/message/chunk/timeout limits, peer-map parsing, malformed entries, whitespace | no |
+| `tests/unit/proto/fragment_contract_test.go` | unit | generated fragment v2 getters, legacy field compatibility, new operation messages | no |
 | `tests/unit/storage/` | unit | schema and indexes, sentinel errors, metadata transactions, replay/conflict handling, fragments, config, stats, legacy and metadata snapshots, factory defaults, support `MockStore` | no |
 | `internal/storage/sqlite_test.go` | unit | SQLite reopen persistence, data/parity round trips, concurrency, close | no |
 | `internal/consensus/fsm_test.go` | unit | put, get, missing key, bad JSON, unknown op, snapshot persistence and restore, stores without `Snapshotter` | no |
 | `internal/consensus/raft_test.go` | component | 3-node election and replication, leader failover, BoltDB log replay after restart, SQLite snapshot restore with a fresh database | no (in-memory transports) |
 | `internal/gateway/router_test.go` | unit | deterministic routing, key distribution, ring wrap-around, empty ring | no |
-| `internal/server/server_test.go` | component | gRPC handlers over `bufconn`: leader writes, follower forwarding, linearizable reads, `NodeStatus` agreement, health, mode validation, fragments, repair, loop guard, `Join` | no (in-process Raft + bufconn) |
+| `internal/server/server_test.go` | component | gRPC handlers over `bufconn`: leader writes, follower forwarding, linearizable reads, `NodeStatus` agreement, health, mode validation, loop guard, `Join` | no (in-process Raft + bufconn) |
+| `internal/server/fragments_test.go` | component | fragment transport over `bufconn`: single/multi-chunk uploads, offsets, consistency, idempotent retry and `AlreadyExists`, replacement, limits, empty fragments, download streaming, delete/list/stat, oversized messages, concurrency, cancellation and timeouts | no (bufconn) |
 | `tests/cluster_test.go` | integration | five-node heartbeat, leader agreement, write through a follower, read from every node | yes (`-tags=integration`) |
 
 The integration file carries `//go:build integration`, so the default
@@ -94,6 +96,22 @@ Useful helpers in that file:
 
 The consensus tests have their own `newTestCluster`, `applyCommand`, and
 `waitForValue` helpers in `internal/consensus/raft_test.go`.
+
+### Fragment transport tests
+
+`internal/server/fragments_test.go` starts only the gRPC front end on a
+`bufconn` listener, so fragment tests need neither Raft nor a SQLite file. The
+`uploadFragment` and `downloadChunks` helpers speak the v2 protocol, and
+`config.Config` fields set the size, chunk, and timeout limits per test:
+
+```powershell
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./internal/server -run 'TestUpload|TestDownload|TestDelete|TestList|TestStat'
+```
+
+The suite covers multi-chunk reassembly, gap/overlap/duplicate offsets,
+mid-stream field changes, checksum and size failures, idempotent retries,
+`AlreadyExists` versus `replace`, empty fragments, parity validation,
+concurrent uploads, gRPC message-size rejection, and context timeouts.
 
 ### Adding a unit test
 

@@ -323,6 +323,21 @@ func TestFragmentRepository(t *testing.T) {
 		t.Fatalf("ListFragments = %+v", refs)
 	}
 
+	// An empty stripe filter lists every local fragment for repair.
+	if err := store.PutFragment(storage.Fragment{StripeID: "stripe-2", ShardIndex: 1, Data: []byte("second")}); err != nil {
+		t.Fatalf("PutFragment for stripe-2: %v", err)
+	}
+	all, err := store.ListFragments("")
+	if err != nil {
+		t.Fatalf("ListFragments(all): %v", err)
+	}
+	if len(all) != 2 || all[0].StripeID != "stripe-1" || all[1].StripeID != "stripe-2" {
+		t.Fatalf("ListFragments(all) = %+v", all)
+	}
+	if err := store.DeleteFragment("stripe-2", 1); err != nil {
+		t.Fatalf("DeleteFragment stripe-2: %v", err)
+	}
+
 	// Updating the payload preserves created_at.
 	updated := []byte("updated")
 	if err := store.PutFragment(storage.Fragment{

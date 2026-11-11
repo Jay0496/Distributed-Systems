@@ -20,6 +20,10 @@ func clearConfigEnv(t *testing.T) {
 		"DATA_DIR",
 		"STORE_PATH",
 		"STORE_BUSY_TIMEOUT",
+		"MAX_FRAGMENT_SIZE",
+		"MAX_MESSAGE_SIZE",
+		"UPLOAD_CHUNK_SIZE",
+		"FRAGMENT_TIMEOUT",
 		"BOOTSTRAP",
 		"JOIN_ADDR",
 		"TLS_ENABLED",
@@ -56,6 +60,18 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.StoreBusyTimeout != 5*time.Second {
 		t.Errorf("StoreBusyTimeout = %v, want 5s", cfg.StoreBusyTimeout)
 	}
+	if cfg.MaxFragmentSize != config.DefaultMaxFragmentSize {
+		t.Errorf("MaxFragmentSize = %d, want %d", cfg.MaxFragmentSize, config.DefaultMaxFragmentSize)
+	}
+	if cfg.MaxMessageSize != config.DefaultMaxMessageSize {
+		t.Errorf("MaxMessageSize = %d, want %d", cfg.MaxMessageSize, config.DefaultMaxMessageSize)
+	}
+	if cfg.UploadChunkSize != config.DefaultUploadChunkSize {
+		t.Errorf("UploadChunkSize = %d, want %d", cfg.UploadChunkSize, config.DefaultUploadChunkSize)
+	}
+	if cfg.FragmentTimeout != config.DefaultFragmentTimeout {
+		t.Errorf("FragmentTimeout = %v, want %v", cfg.FragmentTimeout, config.DefaultFragmentTimeout)
+	}
 	if cfg.Bootstrap {
 		t.Error("Bootstrap = true, want false")
 	}
@@ -79,6 +95,10 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("DATA_DIR", "/tmp/node4")
 	t.Setenv("STORE_PATH", "/tmp/node4/custom.db")
 	t.Setenv("STORE_BUSY_TIMEOUT", "2s")
+	t.Setenv("MAX_FRAGMENT_SIZE", "1048576")
+	t.Setenv("MAX_MESSAGE_SIZE", "524288")
+	t.Setenv("UPLOAD_CHUNK_SIZE", "65536")
+	t.Setenv("FRAGMENT_TIMEOUT", "3s")
 	t.Setenv("BOOTSTRAP", "true")
 	t.Setenv("JOIN_ADDR", "node1:50051")
 	t.Setenv("TLS_ENABLED", "true")
@@ -105,6 +125,18 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 	if cfg.StoreBusyTimeout != 2*time.Second {
 		t.Errorf("StoreBusyTimeout = %v, want 2s", cfg.StoreBusyTimeout)
+	}
+	if cfg.MaxFragmentSize != 1048576 {
+		t.Errorf("MaxFragmentSize = %d, want 1048576", cfg.MaxFragmentSize)
+	}
+	if cfg.MaxMessageSize != 524288 {
+		t.Errorf("MaxMessageSize = %d, want 524288", cfg.MaxMessageSize)
+	}
+	if cfg.UploadChunkSize != 65536 {
+		t.Errorf("UploadChunkSize = %d, want 65536", cfg.UploadChunkSize)
+	}
+	if cfg.FragmentTimeout != 3*time.Second {
+		t.Errorf("FragmentTimeout = %v, want 3s", cfg.FragmentTimeout)
 	}
 	if !cfg.Bootstrap {
 		t.Error("Bootstrap = false, want true")
@@ -188,5 +220,51 @@ func TestLoadRejectsInvalidBusyTimeout(t *testing.T) {
 
 	if cfg.StoreBusyTimeout != 5*time.Second {
 		t.Errorf("StoreBusyTimeout = %v, want fallback 5s", cfg.StoreBusyTimeout)
+	}
+}
+
+func TestLoadRejectsInvalidFragmentLimits(t *testing.T) {
+	clearConfigEnv(t)
+
+	t.Setenv("MAX_FRAGMENT_SIZE", "-1")
+	t.Setenv("MAX_MESSAGE_SIZE", "not-a-number")
+	t.Setenv("UPLOAD_CHUNK_SIZE", "0")
+	t.Setenv("FRAGMENT_TIMEOUT", "-2s")
+
+	cfg := config.Load()
+
+	if cfg.MaxFragmentSize != config.DefaultMaxFragmentSize {
+		t.Errorf("MaxFragmentSize = %d, want fallback %d", cfg.MaxFragmentSize, config.DefaultMaxFragmentSize)
+	}
+	if cfg.MaxMessageSize != config.DefaultMaxMessageSize {
+		t.Errorf("MaxMessageSize = %d, want fallback %d", cfg.MaxMessageSize, config.DefaultMaxMessageSize)
+	}
+	if cfg.UploadChunkSize != config.DefaultUploadChunkSize {
+		t.Errorf("UploadChunkSize = %d, want fallback %d", cfg.UploadChunkSize, config.DefaultUploadChunkSize)
+	}
+	if cfg.FragmentTimeout != config.DefaultFragmentTimeout {
+		t.Errorf("FragmentTimeout = %v, want fallback %v", cfg.FragmentTimeout, config.DefaultFragmentTimeout)
+	}
+}
+
+func TestWithDefaultsFillsZeroValues(t *testing.T) {
+	cfg := config.Config{}.WithDefaults()
+
+	if cfg.MaxFragmentSize != config.DefaultMaxFragmentSize ||
+		cfg.MaxMessageSize != config.DefaultMaxMessageSize ||
+		cfg.UploadChunkSize != config.DefaultUploadChunkSize ||
+		cfg.FragmentTimeout != config.DefaultFragmentTimeout {
+		t.Fatalf("WithDefaults = %+v", cfg)
+	}
+
+	explicit := config.Config{
+		MaxFragmentSize: 10,
+		MaxMessageSize:  9,
+		UploadChunkSize: 8,
+		FragmentTimeout: time.Second,
+	}.WithDefaults()
+	if explicit.MaxFragmentSize != 10 || explicit.MaxMessageSize != 9 ||
+		explicit.UploadChunkSize != 8 || explicit.FragmentTimeout != time.Second {
+		t.Fatalf("WithDefaults overwrote explicit values: %+v", explicit)
 	}
 }
