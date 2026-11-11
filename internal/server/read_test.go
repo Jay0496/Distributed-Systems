@@ -3,9 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math/rand"
+	"sync"
 	"testing"
+	"time"
 
+	"distributed-kv-store/internal/cluster"
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/redundancy"
 	"distributed-kv-store/internal/storage"
@@ -226,5 +230,208 @@ func TestReadInsufficientShards(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("failed owners")) {
 		t.Fatalf("insufficient-shard error does not list owners: %v", err)
+	}
+}
+
+// recordingQueue captures tasks instead of running them.
+type recordingQueue struct {
+	mu    sync.Mutex
+	tasks []cluster.RepairTask
+	err   error
+}
+
+func (q *recordingQueue) Enqueue(task cluster.RepairTask) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.err != nil {
+		return q.err
+	}
+	q.tasks = append(q.tasks, task)
+	return nil
+}
+
+func (q *recordingQueue) Close() {}
+
+func (q *recordingQueue) len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.tasks)
+}
+
+func newRepairingServer(t *testing.T, store *testStore) *Server {
+	t.Helper()
+	srv := newReadTestServer(store)
+	srv.repairQueue = cluster.NewRepairQueue(1, 8, 5*time.Second, srv.performReadRepair)
+	t.Cleanup(srv.repairQueue.Close)
+	return srv
+}
+
+func waitFragmentCount(t *testing.T, store *testStore, stripeID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var last int
+	for time.Now().Before(deadline) {
+		refs, err := store.ListFragments(stripeID)
+		if err != nil {
+			t.Fatalf("list fragments: %v", err)
+		}
+		last = len(refs)
+		if last == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("stripe %q has %d fragments, want %d", stripeID, last, want)
+}
+
+func TestReadRepairFillsMissingRSShards(t *testing.T) {
+	for _, missing := range []int{1, 2} {
+		t.Run(fmt.Sprintf("%d missing", missing), func(t *testing.T) {
+			store := newTestStore()
+			srv := newRepairingServer(t, store)
+			value := bytes.Repeat([]byte("repair-me-"), 123)
+			shards := encodeForTest(t, redundancy.ModeRS32, value)
+			keep := redundancy.TotalShards - missing
+			meta := seedReadStripe(t, store, "repair", string(redundancy.ModeRS32), value, shards[:keep])
+			// A degraded stripe makes the read inspect all five placements, so
+			// every missing shard is discovered and scheduled.
+			if _, err := store.ApplyMetaStatus(2, meta.Key, meta.StripeID, meta.Version, true); err != nil {
+				t.Fatalf("mark degraded: %v", err)
+			}
+
+			resp, err := srv.read(context.Background(), &pb.GetRequest{Key: "repair"})
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if !bytes.Equal(resp.GetValue(), value) {
+				t.Fatal("read returned the wrong value")
+			}
+			if !resp.GetRepaired() {
+				t.Fatal("read did not report an enqueued repair")
+			}
+			waitFragmentCount(t, store, meta.StripeID, redundancy.TotalShards)
+
+			refs, err := store.ListFragments(meta.StripeID)
+			if err != nil {
+				t.Fatalf("list fragments: %v", err)
+			}
+			for _, ref := range refs {
+				if ref.Checksum != shards[ref.ShardIndex].Checksum {
+					t.Fatalf("shard %d repair checksum = %s, want %s", ref.ShardIndex, ref.Checksum, shards[ref.ShardIndex].Checksum)
+				}
+			}
+		})
+	}
+}
+
+func TestReadRepairReplacesCorruptReplicationCopy(t *testing.T) {
+	store := newTestStore()
+	srv := newRepairingServer(t, store)
+	value := bytes.Repeat([]byte("repair-copy-"), 77)
+	shards := encodeForTest(t, redundancy.ModeReplication, value)
+
+	meta := seedReadStripe(t, store, "copy", string(redundancy.ModeReplication), value, shards[1:2])
+	corrupt := shards[0]
+	corrupt.Data = append([]byte(nil), corrupt.Data...)
+	corrupt.Data[0] ^= 0xff
+	if err := store.PutFragment(storage.Fragment{
+		StripeID:   meta.StripeID,
+		ShardIndex: 0,
+		Data:       corrupt.Data,
+		Checksum:   shards[0].Checksum,
+	}); err != nil {
+		t.Fatalf("seed corrupt copy: %v", err)
+	}
+
+	resp, err := srv.read(context.Background(), &pb.GetRequest{Key: "copy"})
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(resp.GetValue(), value) || !resp.GetRepaired() {
+		t.Fatalf("read response success=%v repaired=%v", resp.GetSuccess(), resp.GetRepaired())
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		refs, err := store.ListFragments(meta.StripeID)
+		if err != nil {
+			t.Fatalf("list fragments: %v", err)
+		}
+		for _, ref := range refs {
+			if ref.ShardIndex == 0 && ref.Checksum == shards[0].Checksum {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("corrupt replication copy was not repaired")
+}
+
+func TestReadVerifiedDoesNotEnqueueRepair(t *testing.T) {
+	store := newTestStore()
+	srv := newReadTestServer(store)
+	queue := &recordingQueue{}
+	srv.repairQueue = queue
+
+	value := bytes.Repeat([]byte("verified-"), 51)
+	shards := encodeForTest(t, redundancy.ModeRS32, value)
+	meta := seedReadStripe(t, store, "verified", string(redundancy.ModeRS32), value, shards[:3])
+	if _, err := store.ApplyMetaStatus(2, meta.Key, meta.StripeID, meta.Version, true); err != nil {
+		t.Fatalf("mark degraded: %v", err)
+	}
+
+	got, err := srv.ReadVerified(context.Background(), meta)
+	if err != nil {
+		t.Fatalf("ReadVerified: %v", err)
+	}
+	if !bytes.Equal(got, value) {
+		t.Fatal("ReadVerified returned the wrong value")
+	}
+	if queue.len() != 0 {
+		t.Fatalf("ReadVerified enqueued %d repair tasks", queue.len())
+	}
+}
+
+func TestReadQueueSaturationDoesNotFailRead(t *testing.T) {
+	store := newTestStore()
+	srv := newReadTestServer(store)
+	value := bytes.Repeat([]byte("queue-full-"), 31)
+	shards := encodeForTest(t, redundancy.ModeRS32, value)
+	meta := seedReadStripe(t, store, "queue", string(redundancy.ModeRS32), value, shards[:3])
+	if _, err := store.ApplyMetaStatus(2, meta.Key, meta.StripeID, meta.Version, true); err != nil {
+		t.Fatalf("mark degraded: %v", err)
+	}
+
+	block := make(chan struct{})
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	queue := cluster.NewRepairQueue(1, 1, time.Minute, func(context.Context, cluster.RepairTask) error {
+		startedOnce.Do(func() { close(started) })
+		<-block
+		return nil
+	})
+	srv.repairQueue = queue
+	defer func() {
+		close(block)
+		queue.Close()
+	}()
+
+	if err := queue.Enqueue(cluster.RepairTask{Key: "first"}); err != nil {
+		t.Fatalf("prefill queue: %v", err)
+	}
+	<-started
+	if err := queue.Enqueue(cluster.RepairTask{Key: "second"}); err != nil {
+		t.Fatalf("fill queue: %v", err)
+	}
+
+	resp, err := srv.read(context.Background(), &pb.GetRequest{Key: "queue"})
+	if err != nil {
+		t.Fatalf("read with a full repair queue: %v", err)
+	}
+	if !bytes.Equal(resp.GetValue(), value) {
+		t.Fatal("read with a full repair queue returned the wrong value")
+	}
+	if resp.GetRepaired() {
+		t.Fatal("read claimed a repair was queued even though the queue was full")
 	}
 }

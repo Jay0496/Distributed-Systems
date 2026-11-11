@@ -50,10 +50,11 @@ func (s *Server) read(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 		return nil, status.Error(codes.NotFound, "key not found")
 	}
 
-	value, _, err := s.readVerified(ctx, meta)
+	value, failed, err := s.readVerified(ctx, meta)
 	if err != nil {
 		return nil, readStatusError(err)
 	}
+	repaired := s.enqueueReadRepair(meta, value, failed)
 
 	return &pb.GetResponse{
 		Success:    true,
@@ -62,6 +63,7 @@ func (s *Server) read(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 		StripeId:   meta.StripeID,
 		Version:    meta.Version,
 		ShardsUsed: int32(requiredShards(meta.Mode)),
+		Repaired:   repaired,
 		Checksum:   meta.Checksum,
 	}, nil
 }

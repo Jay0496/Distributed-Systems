@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"sync"
 
+	"distributed-kv-store/internal/cluster"
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/consensus"
 	"distributed-kv-store/internal/redundancy"
@@ -45,6 +46,10 @@ type Server struct {
 	// assign a fixed-seed source before issuing reads.
 	readMu   sync.Mutex
 	readRand *rand.Rand
+
+	// repairQueue runs asynchronous read repair. It is bounded and never
+	// blocks a client read; task 09 replaces it with the shared repair queue.
+	repairQueue cluster.RepairQueue
 }
 
 // New builds a Server with its connection cache and dialer.
@@ -66,7 +71,21 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 	// The method value is bound after construction so Server can own the
 	// default apply implementation without a package-level helper.
 	srv.apply = srv.applyRaft
+	srv.repairQueue = cluster.NewRepairQueue(
+		cfg.ReadRepairWorkers,
+		readRepairQueueCapacity,
+		cfg.WriteTimeout,
+		srv.performReadRepair,
+	)
 	return srv
+}
+
+// Close stops background repair workers. It is safe to call more than once.
+func (s *Server) Close() error {
+	if s.repairQueue != nil {
+		s.repairQueue.Close()
+	}
+	return nil
 }
 
 // Put validates the request, forwards to the leader when necessary, and runs

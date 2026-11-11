@@ -27,6 +27,9 @@ func clearConfigEnv(t *testing.T) {
 		"MAX_VALUE_SIZE",
 		"WRITE_TIMEOUT",
 		"SHARD_UPLOAD_TIMEOUT",
+		"READ_TIMEOUT",
+		"READ_PARALLELISM",
+		"READ_REPAIR_WORKERS",
 		"BOOTSTRAP",
 		"JOIN_ADDR",
 		"TLS_ENABLED",
@@ -84,6 +87,15 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ShardUploadTimeout != config.DefaultShardUploadTimeout {
 		t.Errorf("ShardUploadTimeout = %v, want %v", cfg.ShardUploadTimeout, config.DefaultShardUploadTimeout)
 	}
+	if cfg.ReadTimeout != config.DefaultReadTimeout {
+		t.Errorf("ReadTimeout = %v, want %v", cfg.ReadTimeout, config.DefaultReadTimeout)
+	}
+	if cfg.ReadParallelism != config.DefaultReadParallelism {
+		t.Errorf("ReadParallelism = %d, want %d", cfg.ReadParallelism, config.DefaultReadParallelism)
+	}
+	if cfg.ReadRepairWorkers != config.DefaultReadRepairWorkers {
+		t.Errorf("ReadRepairWorkers = %d, want %d", cfg.ReadRepairWorkers, config.DefaultReadRepairWorkers)
+	}
 	if cfg.Bootstrap {
 		t.Error("Bootstrap = true, want false")
 	}
@@ -114,6 +126,9 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("MAX_VALUE_SIZE", "4194304")
 	t.Setenv("WRITE_TIMEOUT", "20s")
 	t.Setenv("SHARD_UPLOAD_TIMEOUT", "2s")
+	t.Setenv("READ_TIMEOUT", "7s")
+	t.Setenv("READ_PARALLELISM", "3")
+	t.Setenv("READ_REPAIR_WORKERS", "4")
 	t.Setenv("BOOTSTRAP", "true")
 	t.Setenv("JOIN_ADDR", "node1:50051")
 	t.Setenv("TLS_ENABLED", "true")
@@ -161,6 +176,15 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 	if cfg.ShardUploadTimeout != 2*time.Second {
 		t.Errorf("ShardUploadTimeout = %v, want 2s", cfg.ShardUploadTimeout)
+	}
+	if cfg.ReadTimeout != 7*time.Second {
+		t.Errorf("ReadTimeout = %v, want 7s", cfg.ReadTimeout)
+	}
+	if cfg.ReadParallelism != 3 {
+		t.Errorf("ReadParallelism = %d, want 3", cfg.ReadParallelism)
+	}
+	if cfg.ReadRepairWorkers != 4 {
+		t.Errorf("ReadRepairWorkers = %d, want 4", cfg.ReadRepairWorkers)
 	}
 	if !cfg.Bootstrap {
 		t.Error("Bootstrap = false, want true")
@@ -257,6 +281,9 @@ func TestLoadRejectsInvalidFragmentLimits(t *testing.T) {
 	t.Setenv("MAX_VALUE_SIZE", "0")
 	t.Setenv("WRITE_TIMEOUT", "not-a-duration")
 	t.Setenv("SHARD_UPLOAD_TIMEOUT", "-1s")
+	t.Setenv("READ_TIMEOUT", "-1s")
+	t.Setenv("READ_PARALLELISM", "0")
+	t.Setenv("READ_REPAIR_WORKERS", "not-a-number")
 
 	cfg := config.Load()
 
@@ -281,6 +308,15 @@ func TestLoadRejectsInvalidFragmentLimits(t *testing.T) {
 	if cfg.ShardUploadTimeout != config.DefaultShardUploadTimeout {
 		t.Errorf("ShardUploadTimeout = %v, want fallback %v", cfg.ShardUploadTimeout, config.DefaultShardUploadTimeout)
 	}
+	if cfg.ReadTimeout != config.DefaultReadTimeout {
+		t.Errorf("ReadTimeout = %v, want fallback %v", cfg.ReadTimeout, config.DefaultReadTimeout)
+	}
+	if cfg.ReadParallelism != config.DefaultReadParallelism {
+		t.Errorf("ReadParallelism = %d, want fallback %d", cfg.ReadParallelism, config.DefaultReadParallelism)
+	}
+	if cfg.ReadRepairWorkers != config.DefaultReadRepairWorkers {
+		t.Errorf("ReadRepairWorkers = %d, want fallback %d", cfg.ReadRepairWorkers, config.DefaultReadRepairWorkers)
+	}
 }
 
 func TestWithDefaultsFillsZeroValues(t *testing.T) {
@@ -292,7 +328,10 @@ func TestWithDefaultsFillsZeroValues(t *testing.T) {
 		cfg.FragmentTimeout != config.DefaultFragmentTimeout ||
 		cfg.MaxValueSize != config.DefaultMaxValueSize ||
 		cfg.WriteTimeout != config.DefaultWriteTimeout ||
-		cfg.ShardUploadTimeout != config.DefaultShardUploadTimeout {
+		cfg.ShardUploadTimeout != config.DefaultShardUploadTimeout ||
+		cfg.ReadTimeout != config.DefaultReadTimeout ||
+		cfg.ReadParallelism != config.DefaultReadParallelism ||
+		cfg.ReadRepairWorkers != config.DefaultReadRepairWorkers {
 		t.Fatalf("WithDefaults = %+v", cfg)
 	}
 
@@ -304,11 +343,16 @@ func TestWithDefaultsFillsZeroValues(t *testing.T) {
 		MaxValueSize:       7,
 		WriteTimeout:       6 * time.Second,
 		ShardUploadTimeout: 5 * time.Second,
+		ReadTimeout:        4 * time.Second,
+		ReadParallelism:    3,
+		ReadRepairWorkers:  2,
 	}.WithDefaults()
 	if explicit.MaxFragmentSize != 10 || explicit.MaxMessageSize != 9 ||
 		explicit.UploadChunkSize != 8 || explicit.FragmentTimeout != time.Second ||
 		explicit.MaxValueSize != 7 || explicit.WriteTimeout != 6*time.Second ||
-		explicit.ShardUploadTimeout != 5*time.Second {
+		explicit.ShardUploadTimeout != 5*time.Second ||
+		explicit.ReadTimeout != 4*time.Second ||
+		explicit.ReadParallelism != 3 || explicit.ReadRepairWorkers != 2 {
 		t.Fatalf("WithDefaults overwrote explicit values: %+v", explicit)
 	}
 }
