@@ -13,22 +13,23 @@ each node keeps its own persistent Raft log on disk.
 | --- | --- | --- |
 | Raft consensus, snapshots, forwarding, gRPC surface | Jay Savaliya | Complete for this phase |
 | CLI / routing gateway | Khalid | In progress (`cmd/gateway/`, `internal/gateway/`) |
-| SQLite persistence | Parth | In progress (`internal/storage/sqlite.go`) |
+| SQLite persistence | Parth | Complete for this task (`internal/storage/`, `node.db`) |
 | Failure management / Reed-Solomon redundancy | Dhruvin | Interface scaffolded (`internal/redundancy`, `internal/server/fragments.go`) |
 
-The server currently injects `storage.NewMockStore()` behind the `storage.KVStore`
-interface (`internal/storage`). `MockStore` is a temporary development double;
-when the SQLite store finishes, it can be swapped in without touching the
-consensus code, because the FSM only depends on `KVStore` (plus the optional
-`storage.Snapshotter` interface). The placeholder is documented in
-[tests/README.md](tests/README.md).
+The server opens the production SQLite `storage.Store` before Raft starts and
+closes it after Raft and gRPC stop. The database lives at `STORE_PATH`
+(default `${DATA_DIR}/node.db`) and holds the transitional legacy KV rows plus
+the metadata, placement, fragment, config, and applied-index tables used by
+later tasks. The in-memory test double now lives only in `tests/support`;
+production packages do not import it. See
+[internal/storage/README.md](internal/storage/README.md).
 
 ## Architecture at a glance
 
 ```
 client ──gRPC──► any node ──forward──► leader ──Raft (TCP)──► other nodes
                     │                     │
-                    │                     └─ FSM.Apply ─► KVStore
+                    │                     └─ FSM.Apply ─► Store
                     └─ health, fragments, status
 ```
 
@@ -51,7 +52,7 @@ state layout, and recovery behaviour. Design trade-offs are recorded in
 | `internal/redundancy/` | `RedundancyEngine` seam (no-op today) and redundancy-mode validation |
 | `internal/consensus/raft.go` | Raft node: BoltDB log/stable store, file snapshots, bootstrap, `AddVoter`, `Close` |
 | `internal/consensus/fsm.go` | FSM: put/get commands, real snapshot and restore |
-| `internal/storage/` | `KVStore`, `Snapshotter`, in-memory `MockStore`, SQLite work in progress |
+| `internal/storage/` | `Store` interface, SQLite metadata/fragment/config repositories, snapshots |
 | `internal/gateway/` | Consistent-hash router |
 | `internal/cluster/` | Failure detection, degraded-mode reporting, repair scheduling (created now, populated later) |
 | `proto/storage.proto` | gRPC contract (generated files are committed) |
@@ -74,7 +75,9 @@ state layout, and recovery behaviour. Design trade-offs are recorded in
 | `NODE_ID` | `node1` | Unique Raft server ID; also the advertised hostname in Compose |
 | `PORT` | `50051` | gRPC listen port |
 | `RAFT_PORT` | `60051` | Raft TCP listen port |
-| `DATA_DIR` | `/data` | Directory for `raft.db` and `snapshots/` |
+| `DATA_DIR` | `/data` | Directory for `node.db`, `raft.db`, and `snapshots/` |
+| `STORE_PATH` | `${DATA_DIR}/node.db` | SQLite database file |
+| `STORE_BUSY_TIMEOUT` | `5s` | SQLite lock wait |
 | `BOOTSTRAP` | `false` | `true` on the seeding node only |
 | `BOOTSTRAP_SERVERS` | empty | `id=raft-addr,...` for the full cluster; used only when `BOOTSTRAP=true` and no local state exists |
 | `JOIN_ADDR` | empty | Optional `host:port` of a live node used to add this node as a voter |
@@ -143,19 +146,26 @@ target layout, and the white-box exceptions are in
 
 ## Persistence
 
-Each node stores two things under `DATA_DIR`:
+Each node stores three things under `DATA_DIR`:
 
 ```
 /data/
+├── node.db        # SQLite: metadata tables, local fragments, legacy KV rows
+├── node.db-wal    # SQLite write-ahead log (while the node is running)
 ├── raft.db        # BoltDB: Raft log + stable state (term, vote, configuration)
 └── snapshots/     # up to three FSM snapshots written by Raft
 ```
 
+SQLite is opened before Raft starts and closed cleanly on SIGINT/SIGTERM; the
+close checkpoints and releases the WAL. `Snapshot`/`Restore` currently cover the
+legacy KV table used by the transitional write path, while
+`SnapshotMetadata`/`RestoreMetadata` already implement the metadata-only format
+for the next tasks. Fragment payloads are never included in metadata snapshots.
+
 `docker compose down` (without `-v`) keeps the named volumes, so a cluster that
-comes back up replays its log and/or restores its latest snapshot. Because the
-KV data lives in the store (currently the in-memory `MockStore`), it is
-reconstructed by replaying the persisted log/snapshot at startup. Deleting the
-volumes resets the node completely.
+comes back up reopens `node.db`, replays its Raft log, and/or restores its latest
+snapshot. Deleting the volumes resets the node completely. To reset only SQLite,
+stop the node and remove `node.db` and its `-wal`/`-shm` files.
 
 ## Troubleshooting
 
@@ -170,7 +180,7 @@ volumes resets the node completely.
 
 ## Roadmap
 
-- Replace `MockStore` with the SQLite `KVStore` implementation (`internal/storage/sqlite.go`).
 - Wire the CLI/gateway routing layer to the gRPC API.
+- Move the Raft log to metadata-only commands and integrate the fragment write/read path.
 - Implement Reed-Solomon `rs32` encoding in `internal/redundancy` and real repair in `internal/server/fragments.go`.
 - Add certificate provisioning for the optional TLS mode.

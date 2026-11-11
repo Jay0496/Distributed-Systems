@@ -13,11 +13,11 @@ On macOS/Linux, replace `${PWD}` with `$(pwd)`.
 
 | File | Level | What it covers | Needs Compose? |
 | --- | --- | --- | --- |
-| `tests/unit/config/config_test.go` | unit | defaults, env overrides, peer-map parsing, malformed entries, whitespace | no |
-| `internal/storage/mock_store_test.go` | unit | put/get, missing keys, defensive copying, snapshot/restore, 64 concurrent writers/readers | no |
-| `internal/storage/sqlite_test.go` | unit | SQLite persistence across reopen, data/parity round trips, concurrency | no |
+| `tests/unit/config/config_test.go` | unit | defaults, env overrides, store path/busy timeout, peer-map parsing, malformed entries, whitespace | no |
+| `tests/unit/storage/` | unit | schema and indexes, sentinel errors, metadata transactions, replay/conflict handling, fragments, config, stats, legacy and metadata snapshots, factory defaults, support `MockStore` | no |
+| `internal/storage/sqlite_test.go` | unit | SQLite reopen persistence, data/parity round trips, concurrency, close | no |
 | `internal/consensus/fsm_test.go` | unit | put, get, missing key, bad JSON, unknown op, snapshot persistence and restore, stores without `Snapshotter` | no |
-| `internal/consensus/raft_test.go` | component | 3-node election and replication, leader failover, BoltDB log replay after restart, snapshot restore after restart | no (in-memory transports) |
+| `internal/consensus/raft_test.go` | component | 3-node election and replication, leader failover, BoltDB log replay after restart, SQLite snapshot restore with a fresh database | no (in-memory transports) |
 | `internal/gateway/router_test.go` | unit | deterministic routing, key distribution, ring wrap-around, empty ring | no |
 | `internal/server/server_test.go` | component | gRPC handlers over `bufconn`: leader writes, follower forwarding, linearizable reads, `NodeStatus` agreement, health, mode validation, fragments, repair, loop guard, `Join` | no (in-process Raft + bufconn) |
 | `tests/cluster_test.go` | integration | five-node heartbeat, leader agreement, write through a follower, read from every node | yes (`-tags=integration`) |
@@ -51,6 +51,22 @@ docker run --rm -v ${PWD}:/app -w /app golang:1.22 gofmt -l .
 
 `go vet -tags=integration` is important: `go vet ./...` does not compile files
 excluded by build tags, so integration code can rot silently.
+
+### SQLite store tests
+
+`internal/storage` and `tests/unit/storage` use temporary SQLite databases, so
+they need no external service and never touch `/data`:
+
+```powershell
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race ./internal/storage ./tests/unit/storage
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race ./internal/storage -run TestSQLiteReopenPersistence -v
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race ./internal/consensus -run TestRaftSQLiteSnapshotRestore -v
+```
+
+The repository tests open the real schema, so the in-memory test double in
+`tests/support` cannot drift from the production tables. The Raft snapshot test
+forces a snapshot, discards the SQLite file, and proves the FSM restores the
+legacy KV state into a fresh database.
 
 ### How the in-process gRPC tests work
 
@@ -144,6 +160,11 @@ docker compose start node4 node5
 docker compose restart node1
 docker compose down          # no -v
 docker compose up -d
+
+# confirm SQLite is created and survives a restart
+docker compose exec node1 ls -l /data
+docker compose restart node1
+docker compose exec node1 ls -l /data
 ```
 
 After the final `up`, use `NodeStatus` (or the integration tests) to confirm the
@@ -171,9 +192,11 @@ changes additive so the gateway and storage tracks keep compiling.
 ## Notes and known costs
 
 - `TestRaftLeaderFailover` takes about 5 s because it waits for a real election.
-- `TestRaftPersistenceCatchUp` and `TestRaftSnapshotRestore` run in a few
-  seconds; if either hangs, a previous test failed to call `node.Close()` and is
-  still holding the BoltDB lock.
+- `TestRaftPersistenceCatchUp`, `TestRaftSnapshotRestore`, and
+  `TestRaftSQLiteSnapshotRestore` run in a few seconds; if any hangs, a previous
+  test failed to call `node.Close()` and is still holding the BoltDB lock.
 - The race detector roughly doubles the runtime of the consensus suite.
+- SQLite tests use `t.TempDir()` for every database, so `node.db` and its WAL
+  files never leak between runs.
 - The integration suite mutates the live cluster with unique keys
   (`integration-<unix-nano>`), so repeated runs do not collide.

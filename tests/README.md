@@ -57,12 +57,12 @@ docker run --rm --network distributed-systems_cluster-net -v "${PWD}:/app" -w /a
 | Location | Level | Package style | Notes |
 | --- | --- | --- | --- |
 | `tests/unit/config/` | unit | black box (`config_test`) | Env-driven config parsing |
+| `tests/unit/storage/` | unit | black box (`storage_test`) | Schema, metadata, fragments, stats, snapshots, factory, support `MockStore` |
 | `tests/cluster_test.go` | integration | black box (`tests`) | Five-node Compose cluster; moves under `tests/integration` in task 12 |
 | `internal/server/server_test.go` | component | white box (`server`) | In-process Raft + `bufconn`; uses unexported forwarding/fragment helpers |
 | `internal/consensus/fsm_test.go` | unit | white box (`consensus`) | FSM command handling and snapshots |
-| `internal/consensus/raft_test.go` | component | white box (`consensus`) | In-memory Raft cluster fixture |
-| `internal/storage/mock_store_test.go` | unit | white box (`storage`) | In-memory store |
-| `internal/storage/sqlite_test.go` | unit | white box (`storage`) | SQLite persistence and concurrency |
+| `internal/consensus/raft_test.go` | component | white box (`consensus`) | In-memory Raft cluster fixture and SQLite snapshot restore |
+| `internal/storage/sqlite_test.go` | unit | white box (`storage`) | SQLite persistence, parity flags, and concurrency |
 | `internal/gateway/router_test.go` | unit | white box (`gateway`) | Inspects ring and virtual-node fields directly |
 
 ## White-box exceptions
@@ -74,9 +74,10 @@ a test.
 | File | Unexported access |
 | --- | --- |
 | `internal/server/server_test.go` | `forwardedMetadataKey`, the `dialFunc` seam, and fragment key helpers |
+| `internal/server/teststore_test.go` | Package-local `storage.Store` double for server component tests |
 | `internal/consensus/fsm_test.go` | FSM command and snapshot types |
 | `internal/consensus/raft_test.go` | `Node` internals and the in-memory cluster fixture |
-| `internal/storage/mock_store_test.go` | `MockStore` mutation and defensive-copy behaviour |
+| `internal/consensus/teststore_test.go` | Package-local `storage.Store` double for consensus tests |
 | `internal/storage/sqlite_test.go` | SQLite helper functions `InitDB`, `SaveChunk`, `GetChunk` |
 | `internal/gateway/router_test.go` | `Router.nodes` and `Router.ring` |
 
@@ -85,8 +86,8 @@ and `config.Config`, which are the exported seam.
 
 ## Temporary production exceptions
 
-- `internal/storage.MockStore` is still used by `cmd/server` and the FSM tests.
-  It is a development double, clearly documented in the `storage` package doc,
-  and is removed from production wiring by the SQLite production-store task.
 - `internal/redundancy.NoopRedundancy` is a pass-through placeholder. It is
   replaced by the real Reed-Solomon/replication engine in the redundancy task.
+- The legacy full-value `store` table remains until task 06 switches the write
+  path to metadata plus fragments; task 15 removes it. The in-memory `MockStore`
+  lives only under `tests/support` and is not imported by production packages.
