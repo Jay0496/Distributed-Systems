@@ -133,6 +133,84 @@ fragments to satisfy both the Raft quorum and reconstruction, so two node
 failures are tolerated. The engines are unit-tested now; tasks 06 and 07 wire
 them into the fragment write and read paths.
 
+## Metadata protocol
+
+Raft carries metadata only. The committed record for a key is a
+`storage.KeyMeta`:
+
+```go
+type KeyMeta struct {
+    Key       string
+    StripeID  string
+    Mode      string // "rs32" or "replication"
+    Size      int64
+    Checksum  string // SHA-256 hex of the original value
+    Version   int64
+    Degraded  bool
+    Placement []ShardPlacement // five entries, indices 0..4
+}
+```
+
+The FSM validates every metadata command at the consensus boundary and the
+SQLite repository enforces the same invariants transactionally:
+
+1. `Key` and `StripeID` are non-empty; a stripe ID is globally unique.
+2. `Mode` is a concrete `rs32` or `replication` value.
+3. `Version` is at least 1. A lower version is rejected with `conflict`; an
+   equal version is accepted only when stripe ID, checksum, and size match.
+4. `Checksum` is 64 hex characters.
+5. `Placement` has exactly five entries with distinct indices in `0..4` and
+   distinct node IDs. RS marks indices 3 and 4 as parity; replication marks
+   every index as data.
+6. A degraded write still records the deterministic five-way intended
+   placement and sets `Degraded=true`. `set_meta_status` clears the flag after
+   repair without changing the version or checksum.
+
+### Commands
+
+| Op | Fields | Behaviour |
+| --- | --- | --- |
+| `put_meta` | `meta` | Validates and installs a new stripe version. Returns the new metadata and, only for a genuine overwrite with a different stripe ID, the old metadata so the caller can garbage-collect the old fragments. |
+| `set_meta_status` | `key`, `stripe_id`, `version`, `degraded` | Updates only the degraded flag for the matching stripe/version. |
+| `get_meta` | `key` | Linearizable metadata read; a missing key returns `Found=false`, not an error. |
+| `delete_meta` | `key`, optional `version` | Deletes the key and returns its old metadata. A zero version is unconditional; a mismatch returns `conflict` in the same transaction. |
+| `set_config` | `config` | Validates and stores the global default mode. |
+| `get_config` | — | Reads the global default mode; if absent returns `rs32` without writing. |
+
+`Apply` compares the log index with `raft_state.last_applied_index` before
+mutating metadata, so replaying an entry that SQLite already applied is a no-op.
+Expected failures are returned as `Result.Err` with stable codes (`conflict`,
+`invalid`, `not_found`, `internal`) rather than Go errors; a Raft apply panic is
+fatal, so a rejected command must never panic.
+
+The command envelope has no top-level value field. The transitional `put` and
+`get` operations keep the old full-value payload inside a nested `LegacyOp`,
+which is marked deprecated. Metadata commands are limited to 64 KiB of encoded
+JSON; the legacy operations are temporarily exempt because the server still uses
+them until task 06. Task 06 stops writing the legacy operations and task 15
+removes them.
+
+### Snapshots
+
+The FSM owns a versioned snapshot envelope:
+
+```json
+{
+  "schema_version": 2,
+  "metadata": { "stripes": [], "keys": [], "config": {}, "last_applied_index": 0 },
+  "legacy": []
+}
+```
+
+The `metadata` section contains stripes, key metadata, placements, and the
+singleton cluster config, plus `last_applied_index`. It never contains fragment
+payloads. The `legacy` section contains the transitional KV rows and is removed
+in task 15. Restore rejects unknown schema versions, restores both sections in
+one SQLite transaction, and still accepts the version 1 single-section snapshot
+and the pre-SQLite raw map for upgrade safety. Restoring
+`last_applied_index` prevents older log entries from being re-applied on top of
+a newer SQLite state.
+
 ## Request path
 
 ### Write
@@ -167,6 +245,11 @@ sequenceDiagram
    `Raft.Apply` with a 10 s timeout. The call returns once the entry is
    committed by a quorum.
 5. `FSM.Apply` runs on all nodes and writes into the local `Store`.
+
+The sequence above is the transitional legacy path still used by the server. The
+metadata protocol and FSM commands are implemented, but task 06 switches the
+write path to encode fragments out of band and commit `put_meta`; task 07 does
+the same for reads.
 
 ### Read
 
@@ -322,12 +405,13 @@ holds the legacy full-value `store` table during the transition, the metadata
 tables used by later tasks (`keys`, `stripes`, `placements`), local `fragments`,
 the singleton `cluster_config`, and `raft_state.last_applied_index`.
 
-Raft snapshots capture the FSM state. Until task 06 the FSM still writes the
-legacy `store` table, so `Snapshot`/`Restore` cover that table; the restore path
-also accepts snapshots written by the previous in-memory store. The
-metadata-only snapshot path (`SnapshotMetadata`/`RestoreMetadata`) is already
-implemented for task 04 and deliberately excludes fragment payloads: fragments
-are durable on their owner nodes and repaired from peers when missing.
+Raft snapshots use the FSM's `schema_version: 2` envelope. The metadata section
+covers the `keys`, `stripes`, `placements`, `cluster_config`, and
+`raft_state` tables and deliberately excludes fragment payloads: fragments are
+durable on their owner nodes and repaired from peers when missing. Until task 06
+the FSM still writes the legacy `store` table, so the envelope also carries a
+legacy section. Restore applies both sections in one transaction and still
+accepts version 1 snapshots and the pre-SQLite raw map.
 
 The `fragments` table is written by the fragment transport v2 upload handler.
 The client write path does not call that handler until task 06 wires the
@@ -372,10 +456,14 @@ in [DECISIONS.md](DECISIONS.md) (ADR-001).
 
 ## Known limitations
 
-- The write path still stores the full value in the legacy `store` table; the
-  metadata-only path lands in tasks 04 and 06.
+- The server write path still stores the full value through the legacy `put`
+  command in the `store` table. Metadata commands, validation, idempotency, and
+  snapshots are implemented; task 06 wires them into the write path and task 07
+  into reads.
 - The write and read paths do not call the fragment transport yet; task 06
-  wires uploads into `Put` and task 07 wires downloads into `Get`.
+  wires uploads into `Put` and task 07 wires downloads into `Get`. Fragments are
+  only written to the `fragments` table when the transport is called directly,
+  for example by tests or repair paths.
 - `x-kv-forwarded` prevents loops but assumes `PEERS` is complete and correct.
 - Reads append log entries (no read-index optimisation yet).
 - The redundancy engines and placement are implemented and unit-tested, but the

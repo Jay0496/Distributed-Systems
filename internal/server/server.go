@@ -63,12 +63,15 @@ func (s *Server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, 
 		return s.forwardPut(ctx, req)
 	}
 
-	// Wrap the request in a Raft command.
+	// Wrap the request in a Raft command. The full value still travels through
+	// the log until task 06 installs the metadata-only write path.
+	// TODO(task 06): encode the value, push fragments, and commit only metadata.
 	cmd := consensus.Command{
-		Op:    "put",
-		Mode:  req.GetMode(),
-		Key:   req.GetKey(),
-		Value: req.GetValue(),
+		Op: consensus.OpPut,
+		Legacy: &consensus.LegacyOp{
+			Key:   req.GetKey(),
+			Value: req.GetValue(),
+		},
 	}
 	data, err := json.Marshal(cmd)
 	if err != nil {
@@ -99,7 +102,8 @@ func (s *Server) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, 
 
 	// Reads go through the Raft log so they observe all previously committed
 	// writes (linearizable reads).
-	cmd := consensus.Command{Op: "get", Key: req.GetKey()}
+	// TODO(task 06): read metadata through Raft and gather fragments locally.
+	cmd := consensus.Command{Op: consensus.OpGet, Key: req.GetKey()}
 	data, err := json.Marshal(cmd)
 	if err != nil {
 		return &pb.GetResponse{Success: false}, nil
