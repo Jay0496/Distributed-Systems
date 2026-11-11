@@ -199,18 +199,32 @@ func StartCluster(t testing.TB, count int) *Cluster {
 // in-memory transport.
 func (c *Cluster) SetUnreachable(ids ...string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for _, id := range ids {
 		c.unreachable[id] = true
+	}
+	c.mu.Unlock()
+
+	// Drop cached dials so a connection opened before the partition cannot
+	// bypass the injected failure.
+	for _, n := range c.Nodes {
+		if n.Server != nil {
+			n.Server.DropConnections()
+		}
 	}
 }
 
 // SetReachable re-enables dialing to the named nodes.
 func (c *Cluster) SetReachable(ids ...string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for _, id := range ids {
 		delete(c.unreachable, id)
+	}
+	c.mu.Unlock()
+
+	for _, n := range c.Nodes {
+		if n.Server != nil {
+			n.Server.DropConnections()
+		}
 	}
 }
 

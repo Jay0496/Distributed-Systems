@@ -93,7 +93,8 @@ func (s *Server) readRS32(ctx context.Context, meta storage.KeyMeta, mode redund
 		return nil, failed, err
 	}
 
-	value, ok := decodeRS32(valid, meta)
+	value, corrupt, ok := decodeRS32(valid, meta)
+	failed = appendUniqueRefs(failed, corrupt...)
 	if !ok && len(attempted) < len(meta.Placement) {
 		// A checksum failure can mean the first three shards were individually
 		// valid but mutually inconsistent. Fetch the rest and try every subset.
@@ -102,8 +103,9 @@ func (s *Server) readRS32(ctx context.Context, meta storage.KeyMeta, mode redund
 			return nil, failed, gatherErr
 		}
 		valid = append(valid, moreValid...)
-		failed = append(failed, moreFailed...)
-		value, ok = decodeRS32(valid, meta)
+		failed = appendUniqueRefs(failed, moreFailed...)
+		value, corrupt, ok = decodeRS32(valid, meta)
+		failed = appendUniqueRefs(failed, corrupt...)
 	}
 
 	if len(valid) < redundancy.RSDataShards {
@@ -155,28 +157,52 @@ func (s *Server) readReplication(ctx context.Context, meta storage.KeyMeta) ([]b
 }
 
 // decodeRS32 tries every three-shard subset. A subset succeeds only when the
-// decoded value matches both the committed length and SHA-256 checksum.
-func decodeRS32(valid []fetchedShard, meta storage.KeyMeta) ([]byte, bool) {
+// decoded value matches both the committed length and SHA-256 checksum. Shards
+// that never participate in a successful subset are reported as corrupt, which
+// covers a fragment whose stored checksum matches its corrupted bytes.
+func decodeRS32(valid []fetchedShard, meta storage.KeyMeta) ([]byte, []ShardRef, bool) {
 	if len(valid) < redundancy.RSDataShards {
-		return nil, false
+		return nil, nil, false
 	}
 	engine := redundancy.NewRS32Engine()
+	good := make(map[int]struct{}, len(valid))
+	var best []byte
+	found := false
 
 	for i := 0; i < len(valid)-2; i++ {
 		for j := i + 1; j < len(valid)-1; j++ {
 			for k := j + 1; k < len(valid); k++ {
 				shards := []redundancy.Shard{valid[i].shard, valid[j].shard, valid[k].shard}
 				value, err := engine.Decode(shards, redundancy.ModeRS32, meta.Size)
-				if err != nil {
+				if err != nil || !valueMatches(value, meta) {
 					continue
 				}
-				if valueMatches(value, meta) {
-					return value, true
+				if !found {
+					best = value
+					found = true
 				}
+				good[valid[i].shard.Index] = struct{}{}
+				good[valid[j].shard.Index] = struct{}{}
+				good[valid[k].shard.Index] = struct{}{}
 			}
 		}
 	}
-	return nil, false
+	if !found {
+		return nil, nil, false
+	}
+
+	var corrupt []ShardRef
+	for _, candidate := range valid {
+		if _, ok := good[candidate.shard.Index]; ok {
+			continue
+		}
+		corrupt = append(corrupt, ShardRef{
+			ShardIndex: candidate.ref.ShardIndex,
+			NodeID:     candidate.ref.NodeID,
+			Corrupt:    true,
+		})
+	}
+	return best, corrupt, true
 }
 
 // decodeReplication returns the first copy that matches the committed value

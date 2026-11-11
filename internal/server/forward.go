@@ -67,6 +67,18 @@ func (s *Server) getConn(ctx context.Context, target string) (*grpc.ClientConn, 
 	return conn, nil
 }
 
+// DropConnections closes and forgets every cached peer connection. Tests use
+// it when simulating a partition so a previously cached connection cannot
+// bypass the injected dial failure.
+func (s *Server) DropConnections() {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	for target, conn := range s.conns {
+		_ = conn.Close()
+		delete(s.conns, target)
+	}
+}
+
 // dropConn closes and forgets a cached connection so the next attempt redials.
 func (s *Server) dropConn(target string) {
 	s.connMu.Lock()
