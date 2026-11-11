@@ -184,12 +184,13 @@ Expected failures are returned as `Result.Err` with stable codes (`conflict`,
 `invalid`, `not_found`, `internal`) rather than Go errors; a Raft apply panic is
 fatal, so a rejected command must never panic.
 
-The command envelope has no top-level value field. The transitional `put` and
-`get` operations keep the old full-value payload inside a nested `LegacyOp`,
-which is marked deprecated. Metadata commands are limited to 64 KiB of encoded
-JSON; the legacy operations are temporarily exempt because the server still uses
-them until task 06. Task 06 stops writing the legacy operations and task 15
-removes them.
+The command envelope has no top-level value field. The transitional legacy
+operations keep the old full-value payload inside a nested `LegacyOp`, which is
+marked deprecated. Metadata commands are limited to 64 KiB of encoded JSON; the
+legacy operations are temporarily exempt. Neither `Put` nor `Get` uses the
+legacy commands any more: writes use `put_meta` and reads use `get_meta` plus
+fragment gathering. Task 15 removes the legacy commands and their snapshot
+section.
 
 ### Snapshots
 
@@ -317,19 +318,91 @@ before allocating a version, so the write continues under a fresh stripe ID.
 
 ### Read
 
-Reads still use the transition path with `{op:"get"}`. A get command is appended
-to the Raft log, committed, and evaluated by the FSM, which returns
-`GetResult{Value, Found, Err}` via `future.Response()`. This gives a
-**linearizable read** without relying on a leader lease or read-index protocol:
-if a read is committed, it observes every write that committed before it.
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant F as Receiving node
+    participant L as Leader
+    participant R as Raft group
+    participant O as Fragment owners
 
-Task 07 replaces this with `get_meta` plus fragment gathering and decoding. The
-current read path does not observe metadata-only writes, which is why the write
-tests assert on committed metadata and fragments rather than reading through
-`Get`.
+    C->>F: Get(key)
+    F->>L: forward Get when not leader
+    L->>R: Apply(get_meta, key)
+    R-->>L: committed metadata or not found
+    L->>O: download up to five fragments concurrently
+    O-->>L: shard bytes, checksums, and per-owner failures
+    L->>L: verify fragment checksums, decode, verify value checksum and size
+    L-->>L: enqueue asynchronous read repair for failed placements
+    L-->>F: GetResponse{value, mode, stripe, version, shards_used, repaired}
+    F-->>C: GetResponse
+```
 
-The cost of the legacy read is that reads consume log space and a round trip
-through Raft. Log compaction (`Snapshot()`) bounds the disk usage.
+1. A follower forwards the read to the leader, exactly as it forwards a write.
+   The follower never serves its local replica.
+2. The leader applies `get_meta` through Raft. This is the linearizability point:
+   a read observes every metadata write that committed before it. A missing key
+   returns `NotFound` and never starts fragment traffic.
+3. The leader reads the five placements from the committed metadata and fetches
+   fragments concurrently with `READ_PARALLELISM` workers (default 5) and one
+   `READ_TIMEOUT` deadline per owner (default 5 s). A placement on the leader is
+   read directly from the local SQLite store instead of dialing loopback.
+4. RS reads try owners in randomized order: three valid shards are enough, so
+   no new fetch is issued after the third success. Replication reads try shard
+   index order and stop after the first copy that passes both its fragment
+   checksum and the final value checksum. The exception is a degraded stripe
+   (`metadata.degraded=true`): the leader fetches all five placements so repair
+   sees every missing or corrupt shard.
+5. Missing fragments, connection failures, deadline expiry, and checksum
+   mismatches count as failed shards; they never abort the whole read. The
+   leader verifies each shard's SHA-256 before decode, rejects duplicate or
+   inconsistent shards, and decodes RS(3,2) from any three shards or takes one
+   replication copy.
+6. The decoded value must match the committed `size` and SHA-256 `checksum`.
+   If it does not, the leader fetches any remaining placements and tries other
+   shard subsets. An RS shard that never participates in a successful subset is
+   treated as corrupt even when its own stored checksum matched its bytes. If no
+   subset verifies, the read returns `DataLoss` and never exposes unverified
+   bytes.
+7. After a successful read, every failed placement is queued for asynchronous
+   read repair. The queue is bounded (`READ_REPAIR_WORKERS`, default 2, with a
+   64-task buffer) and an enqueue failure logs and drops only the repair; the
+   client response is never delayed. `GetResponse.repaired` reports whether the
+   task was accepted.
+8. A repair worker re-reads metadata through Raft and confirms the key still
+   points at the same stripe ID and version. If an overwrite or delete won the
+   race, it drops the task. Otherwise it re-encodes the verified value, verifies
+   the new shard checksums, and uploads missing shards with the ordinary
+   fragment upload. Corrupt copies use `replace=true` so the transport may
+   overwrite a different checksum. It writes only to the owners named by the
+   current placement.
+9. Read repair does **not** clear `metadata.degraded` in this task. Task 09 owns
+   `set_meta_status` and the final all-five-present check, and it replaces the
+   in-process queue with the shared repair queue.
+
+`Server.ReadVerified(ctx, meta)` is the repair-facing wrapper around the same
+gather/decode/verify path. It returns the verified bytes, never enqueues read
+repair, and never writes metadata. The task 09 repairer consumes it through a
+`ValueReader` interface; `internal/cluster` never imports `internal/server`.
+
+The cost of a read is one Raft round trip for metadata plus the fragment
+fetches. The metadata entry is small, so log compaction (`Snapshot()`) remains
+cheap; fragments are transferred out of band and are never in the log.
+
+#### Read errors
+
+| Condition | gRPC status |
+| --- | --- |
+| Key has no committed metadata | `NotFound` |
+| Fewer than three valid RS shards | `FailedPrecondition`, listing live and failed owners |
+| No valid replication copy | `FailedPrecondition`, listing failed owners |
+| Enough shards but no subset matches the value checksum | `DataLoss` |
+| Raft metadata read times out | `DeadlineExceeded` |
+| Store read or unexpected decode failure | `Internal` |
+
+Application failures are status errors because `GetResponse` carries the value
+and stripe details rather than an error message. Follower forwarding propagates
+the leader's status unchanged; only `Unavailable` is retried once.
 
 ### Other RPCs
 
@@ -493,10 +566,14 @@ exactly one fragment on each of the five nodes.
 - **Writes** are linearizable: they return only after a quorum of Raft commits the
   metadata, and only after at least three shards/copies are durably stored. A
   write with fewer than five stored is reported as degraded.
-- **Reads** are linearizable: they are committed through the log before being
-  served.
+- **Reads** are linearizable: the leader commits a `get_meta` entry through Raft
+  before fetching fragments, and returns only a value that matches the committed
+  size and SHA-256 checksum.
 - **Follower reads** are forwarded to the leader, so a follower never serves
   stale local data through the public API.
+- **Read repair** is best effort and asynchronous. A successful read enqueues
+  repair for missing or corrupt placements without delaying the response; the
+  value returned by that read is already fully verified.
 - **Catch-up** is “eventually consistent” only for internal replica state while
   it is behind; it converges as soon as the leader replicates to it.
 - **No quorum, no progress**: with fewer than three of five nodes alive, writes
@@ -507,6 +584,8 @@ exactly one fragment on each of the five nodes.
 | Scenario | Behaviour |
 | --- | --- |
 | Follower dies | Quorum (3/5) still commits. On restart the follower's BoltDB log replays, then the leader streams the missing entries. |
+| One or two RS shards missing/corrupt | A read succeeds from any three valid shards and queues asynchronous repair of the failed placements. |
+| Three RS shards missing or no replication copy survives | The read fails with `FailedPrecondition` and lists the failed owners; it never returns partial data. |
 | Leader dies | Remaining nodes elect a new leader after the election timeout. Followers re-resolve the leader on the next request. |
 | Leader restarts | It rejoins as a follower using its persisted log and configuration; a new leader may already exist. |
 | Whole cluster restarts | Each node reopens `raft.db` and `node.db`, restores state, and rejoins the persisted configuration; the leader is re-elected. |
@@ -528,17 +607,17 @@ in [DECISIONS.md](DECISIONS.md) (ADR-001).
 
 ## Known limitations
 
-- `Get` still uses the transitional legacy `get` command and the `store` table.
-  New metadata-only writes are not visible through `Get`; task 07 replaces the
-  read path with `get_meta` plus fragment gathering and decoding.
-- Automatic repair and failure detection are not implemented yet. Degraded
-  metadata is recorded and old-stripe garbage collection is best effort, but the
-  task 09 repair loop is what restores missing shards and retries failed cleanup.
+- Reads are leader-coordinated. There is no leader lease, read-index protocol,
+  follower-local read, or gateway-side gathering yet; every read uses one Raft
+  round trip for metadata and then owner fetches from the leader.
+- Read repair is an in-process best-effort queue with no retry or backoff.
+  Background failure detection, scheduled repair, orphan sweeping, and clearing
+  `metadata.degraded` are task 09. Degraded metadata therefore stays set until
+  the repair subsystem confirms all five fragments are present.
 - Ambient orphan fragments can remain when a metadata commit is ambiguous or a
   process dies mid-GC. They are invisible to reads and are removed by the task 09
   orphan sweep after a grace period.
 - `x-kv-forwarded` prevents loops but assumes `PEERS` is complete and correct.
-- Reads append log entries (no read-index optimisation yet).
 - TLS is optional but not provisioned automatically; the Compose cluster runs
   in plaintext.
 - Raft membership changes go through `Join`; there is no automatic rebalancing.

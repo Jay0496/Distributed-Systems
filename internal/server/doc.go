@@ -33,6 +33,41 @@
 // gRPC status errors are reserved for transport-level failures such as a broken
 // forward, which preserves the existing response shape for clients.
 //
+// # Read coordinator
+//
+// Get delegates to the leader-side coordinator in read.go. The leader applies a
+// get_meta command through Raft, so the metadata it reads is linearizable, then
+// fetches fragments from the deterministic owners recorded in that metadata.
+// Followers forward reads to the leader and never serve local replicas.
+//
+// Fetches run concurrently with READ_PARALLELISM workers and a READ_TIMEOUT
+// deadline per owner. The leader reads its own placement directly from SQLite.
+// RS reads try owners in randomized order and stop after three valid shards;
+// replication reads try index order and stop after the first copy that matches
+// the value checksum. A degraded stripe fetches all five placements so repair
+// can see every missing or corrupt shard.
+//
+// Every shard's SHA-256 is verified before decode. RS(3,2) decodes from any
+// three-shard subset, and replication takes one copy. The decoded value must
+// match metadata.Size and metadata.Checksum. If it does not, the leader fetches
+// any remaining placements and tries different subsets; an RS shard that never
+// participates in a successful subset is treated as corrupt. Unverified bytes
+// are never returned.
+//
+// After a successful read, failed placements are enqueued on a bounded,
+// non-blocking read-repair queue. The worker re-reads metadata, drops the task
+// if the key now points at another stripe or version, re-encodes the verified
+// value, and uploads missing shards or replaces corrupt copies only on their
+// intended owners. Read repair never clears metadata.degraded; task 09 owns the
+// final status check and the shared repair queue.
+//
+// Read failures are status errors because GetResponse has no message field:
+// NotFound for a missing key, FailedPrecondition for insufficient RS shards or
+// no replication copy, DataLoss when enough shards arrived but no subset
+// verified, DeadlineExceeded for a Raft read timeout, and Internal for store
+// failures. ReadVerified exposes the same gather/decode/verify path to the task
+// 09 repairer without enqueuing repair or writing metadata.
+//
 // # Fragment transport v2
 //
 // Fragments are addressed by the pair (stripe_id, shard_index). The stripe ID

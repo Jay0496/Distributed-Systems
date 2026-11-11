@@ -22,10 +22,13 @@ On macOS/Linux, replace `${PWD}` with `$(pwd)`.
 | `internal/gateway/router_test.go` | unit | deterministic routing, key distribution, ring wrap-around, empty ring | no |
 | `internal/server/server_test.go` | component | gRPC handlers over `bufconn`: leader writes, follower forwarding, metadata commits, `NodeStatus` agreement, health, mode validation, loop guard, `Join` | no (in-process Raft + bufconn) |
 | `internal/server/write_test.go` | component | write validation, mode resolution, version allocation, upload quorum, commit outcomes, overwrite GC | no (bufconn + fake apply) |
+| `internal/server/read_test.go` | component | RS and replication reads, missing/corrupt shards, local fast path, read-repair queue and saturation, explicit NotFound/FailedPrecondition/DataLoss/DeadlineExceeded/Internal mapping, `ReadVerified` without repair | no (fake apply + local store) |
+| `internal/cluster/repair_queue_test.go` | unit | bounded worker queue, handler execution, `ErrRepairQueueFull`, idempotent close | no |
 | `internal/server/fragment_push_test.go` | component | concurrent shard uploads, local-owner fast path, unreachable owners, checksum rejection | no (bufconn) |
 | `internal/server/fragments_test.go` | component | fragment transport over `bufconn`: single/multi-chunk uploads, offsets, consistency, idempotent retry and `AlreadyExists`, replacement, limits, empty fragments, download streaming, delete/list/stat, oversized messages, concurrency, cancellation and timeouts | no (bufconn) |
 | `tests/integration/write_path_test.go` | integration (in-process) | five-node Raft + SQLite write path: RS shard placement, replication copies, degraded writes, quorum rejection, overwrite GC | no |
-| `tests/cluster_test.go` | integration | five-node Compose cluster: leader agreement and write through a follower; read assertions move to task 07 | yes (`-tags=integration`) |
+| `tests/integration/read_path_test.go` | integration (in-process) | five-node read path: RS reads with two owners down, corrupt-shard read repair, replication fallback from one remote copy, three-shard failure, NotFound forwarding | no |
+| `tests/cluster_test.go` | integration | five-node Compose cluster: leader agreement and write through a follower; read-path coverage lives in the in-process suite | yes (`-tags=integration`) |
 
 The integration file carries `//go:build integration`, so the default
 `go test ./...` is green even when no cluster is running. The target layout,
@@ -100,6 +103,30 @@ Useful helpers in that file:
 The consensus tests have their own `newTestCluster`, `applyCommand`, and
 `waitForValue` helpers in `internal/consensus/raft_test.go`.
 
+### Read path tests
+
+`internal/server/read_test.go` seeds committed metadata and local fragments in a
+`testStore`, so it exercises gather/decode/verify without a live cluster. The
+read-repair cases start a real in-process `cluster.WorkQueue` and poll the store
+until the intended fragment is restored. A full repair queue must still produce
+a successful read with `repaired=false`.
+
+```powershell
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./internal/server -run 'TestRead'
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./internal/cluster
+```
+
+`tests/integration/read_path_test.go` uses the same five-node SQLite+Raft harness
+as the write tests. `SetUnreachable` drops cached gRPC connections, so a
+previously dialed owner cannot bypass the simulated partition. The repair test
+corrupts a fragment through the store API, marks the stripe degraded with
+`set_meta_status`, reads through the leader, and waits for the repair worker to
+restore the intended checksum.
+
+```powershell
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -count=1 -v ./tests/integration
+```
+
 ### Fragment transport tests
 
 `internal/server/fragments_test.go` starts only the gRPC front end on a
@@ -158,8 +185,8 @@ What the tests assert:
 2. **Leader agreement** – all five report the same `leader_id`, exactly one is
    in state `Leader`, and the term is non-zero.
 3. **Write via follower** – a write sent to a non-leader succeeds (proving
-   forwarding) and returns a stripe ID and version. Read-back assertions return
-   with the task 07 read path.
+   forwarding) and returns a stripe ID and version. Reads through a follower
+   exercise forwarding in the other direction.
 
 ## Manual verification checklist
 
