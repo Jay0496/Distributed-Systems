@@ -4,6 +4,8 @@ go 1.22.12
 
 require (
 	github.com/hashicorp/raft v1.7.3
+	github.com/hashicorp/raft-boltdb/v2 v2.3.0
+	github.com/klauspost/reedsolomon v1.12.4
 	github.com/mattn/go-sqlite3 v1.14.52
 	google.golang.org/grpc v1.62.1
 	google.golang.org/protobuf v1.33.0
@@ -19,12 +21,12 @@ require (
 	github.com/hashicorp/go-metrics v0.5.4 // indirect
 	github.com/hashicorp/go-msgpack/v2 v2.1.2 // indirect
 	github.com/hashicorp/golang-lru v0.5.0 // indirect
-	github.com/hashicorp/raft-boltdb/v2 v2.3.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.8 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	go.etcd.io/bbolt v1.3.5 // indirect
 	golang.org/x/net v0.20.0 // indirect
-	golang.org/x/sys v0.16.0 // indirect
+	golang.org/x/sys v0.24.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240123012728-ef4313101c80 // indirect
 )
