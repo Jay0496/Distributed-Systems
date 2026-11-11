@@ -20,9 +20,12 @@ On macOS/Linux, replace `${PWD}` with `$(pwd)`.
 | `internal/consensus/fsm_test.go` | unit | put, get, missing key, bad JSON, unknown op, snapshot persistence and restore, stores without `Snapshotter` | no |
 | `internal/consensus/raft_test.go` | component | 3-node election and replication, leader failover, BoltDB log replay after restart, SQLite snapshot restore with a fresh database | no (in-memory transports) |
 | `internal/gateway/router_test.go` | unit | deterministic routing, key distribution, ring wrap-around, empty ring | no |
-| `internal/server/server_test.go` | component | gRPC handlers over `bufconn`: leader writes, follower forwarding, linearizable reads, `NodeStatus` agreement, health, mode validation, loop guard, `Join` | no (in-process Raft + bufconn) |
+| `internal/server/server_test.go` | component | gRPC handlers over `bufconn`: leader writes, follower forwarding, metadata commits, `NodeStatus` agreement, health, mode validation, loop guard, `Join` | no (in-process Raft + bufconn) |
+| `internal/server/write_test.go` | component | write validation, mode resolution, version allocation, upload quorum, commit outcomes, overwrite GC | no (bufconn + fake apply) |
+| `internal/server/fragment_push_test.go` | component | concurrent shard uploads, local-owner fast path, unreachable owners, checksum rejection | no (bufconn) |
 | `internal/server/fragments_test.go` | component | fragment transport over `bufconn`: single/multi-chunk uploads, offsets, consistency, idempotent retry and `AlreadyExists`, replacement, limits, empty fragments, download streaming, delete/list/stat, oversized messages, concurrency, cancellation and timeouts | no (bufconn) |
-| `tests/cluster_test.go` | integration | five-node heartbeat, leader agreement, write through a follower, read from every node | yes (`-tags=integration`) |
+| `tests/integration/write_path_test.go` | integration (in-process) | five-node Raft + SQLite write path: RS shard placement, replication copies, degraded writes, quorum rejection, overwrite GC | no |
+| `tests/cluster_test.go` | integration | five-node Compose cluster: leader agreement and write through a follower; read assertions move to task 07 | yes (`-tags=integration`) |
 
 The integration file carries `//go:build integration`, so the default
 `go test ./...` is green even when no cluster is running. The target layout,
@@ -72,7 +75,7 @@ legacy KV state into a fresh database.
 
 ### How the in-process gRPC tests work
 
-`internal/server/server_test.go` builds a real three-node Raft cluster with
+`internal/server/server_test.go` builds a real five-node Raft cluster with
 `raft.NewInmemTransport`, then puts a gRPC server in front of each node on a
 `bufconn` listener. Each node is constructed with an injected dial function:
 
@@ -155,8 +158,8 @@ What the tests assert:
 2. **Leader agreement** – all five report the same `leader_id`, exactly one is
    in state `Leader`, and the term is non-zero.
 3. **Write via follower** – a write sent to a non-leader succeeds (proving
-   forwarding), and every node then returns the value through a linearizable
-   read.
+   forwarding) and returns a stripe ID and version. Read-back assertions return
+   with the task 07 read path.
 
 ## Manual verification checklist
 

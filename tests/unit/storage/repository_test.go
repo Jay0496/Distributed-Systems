@@ -327,6 +327,21 @@ func TestFragmentRepository(t *testing.T) {
 	if err := store.PutFragment(storage.Fragment{StripeID: "stripe-2", ShardIndex: 1, Data: []byte("second")}); err != nil {
 		t.Fatalf("PutFragment for stripe-2: %v", err)
 	}
+	// An empty replication copy must round-trip as a zero-length blob rather
+	// than a NULL that violates the fragments.data constraint.
+	if err := store.PutFragment(storage.Fragment{StripeID: "stripe-empty", ShardIndex: 0, Data: nil, Checksum: digest(nil)}); err != nil {
+		t.Fatalf("PutFragment for empty fragment: %v", err)
+	}
+	empty, err := store.GetFragment("stripe-empty", 0)
+	if err != nil {
+		t.Fatalf("GetFragment for empty fragment: %v", err)
+	}
+	if len(empty.Data) != 0 || empty.Checksum != digest(nil) {
+		t.Fatalf("empty fragment = %+v", empty)
+	}
+	if err := store.DeleteStripe("stripe-empty"); err != nil {
+		t.Fatalf("DeleteStripe empty fragment: %v", err)
+	}
 	all, err := store.ListFragments("")
 	if err != nil {
 		t.Fatalf("ListFragments(all): %v", err)

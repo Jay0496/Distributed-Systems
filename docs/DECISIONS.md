@@ -9,6 +9,7 @@
 | ADR-005 | Domain-oriented `cmd/` and `internal/` package layout | Accepted |
 | ADR-006 | Use RS(3,2) and five-copy replication on a five-node cluster | Accepted |
 | ADR-007 | Keep Raft metadata-only and move fragments out of band | Accepted |
+| ADR-008 | Write fragments before metadata and require a three-shard quorum | Accepted |
 
 ---
 
@@ -309,8 +310,9 @@ Support exactly two modes, both of which produce five fragments per stripe:
 - `replication`: five full copies, global indices `0..4`, every index data.
 
 Each stripe places its five fragments on five distinct nodes with deterministic
-hash rotation. The default mode is replication; an empty per-request mode
-resolves to that default. Do not implement a 3x replication mode.
+hash rotation. The cluster default mode is `rs32`; an empty per-request mode
+resolves to the mode stored in cluster configuration, falling back to `rs32`
+when no configuration exists. Do not implement a 3x replication mode.
 
 ### Rationale
 
@@ -394,8 +396,9 @@ errors so a rejected command can never look like a Raft failure.
 
 The transitional `put`/`get` commands still carry values, but the payload is
 isolated in a nested `LegacyOp` so metadata commands have no value-shaped field.
-They are exempt from the size guard only while the write path is being migrated.
-Task 06 stops writing them and task 15 removes them.
+They are exempt from the size guard only while the transition lasts. The write
+path stopped writing them in task 06; task 15 removes them and the legacy
+snapshot section.
 
 Snapshots use an FSM-owned envelope with `schema_version: 2`:
 
@@ -466,3 +469,87 @@ Metadata snapshots never include fragment payloads.
   metadata-only invariant hard to enforce. Nested `LegacyOp` is explicit and is
   removed with the transition.
 
+
+---
+
+## ADR-008: Write fragments before metadata and require a three-shard quorum
+
+**Date:** 2026-11-11
+**Status:** Accepted
+
+### Context
+
+Fragments and metadata live in different places: fragments are node-local SQLite
+rows, while key metadata is committed through Raft. The write path must choose an
+ordering and must decide how many stored fragments make a write successful. A
+partial failure is normal on a five-node cluster: an owner can be unreachable
+while the Raft quorum is healthy.
+
+### Decision
+
+The leader stores fragments first and commits `put_meta` last. A write succeeds
+when at least `writeQuorum = 3` shards or copies are durably stored and the
+metadata commit succeeds. Five stored fragments is a healthy write; three or four
+is committed with `Degraded=true`.
+
+Cleanup depends on what the commit outcome proves:
+
+- A definite rejection (`conflict` or `invalid`) proves the entry was not
+  applied. The new stripe's successfully uploaded fragments are deleted.
+- An ambiguous failure (timeout, leadership loss, connection loss, or an internal
+  apply error) may have committed. Fragments are retained; deleting them could
+  destroy the live stripe the caller cannot see yet. The task 09 orphan sweep
+  removes only fragments that no committed metadata references after a grace
+  period.
+- A successful overwrite garbage-collects the previous stripe's fragments
+  asynchronously, after the new metadata commits, on the owners recorded in the
+  old metadata. The apply has already removed the old stripe and placement rows.
+
+### Rationale
+
+- Metadata is the visibility point. Committing it before the data exists would
+  let a read observe a key whose fragments were never stored. Fragments first
+  means committed metadata always points at data that was at least attempted.
+- Three matches the Raft quorum. With all five fragments stored, any three live
+  nodes hold enough data for both consensus and reconstruction, so two failures
+  are survivable. A degraded RS write that stored only three shards is readable
+  now but needs repair before the strong two-failure claim applies; a degraded
+  replication write remains readable through any surviving copy.
+- Collecting all upload results instead of cancelling on the first error is what
+  makes partial success usable. Cancellation would turn one slow owner into a
+  failed write even though three healthy owners already stored the stripe.
+- Asynchronous GC keeps the client latency independent of slow or dead old
+  owners. Leaked fragments are invisible to reads and are counted by stats.
+
+### Consequences
+
+**Positive**
+
+- Committed metadata never points at a stripe that had no chance to store data.
+- One or two unreachable owners produce a successful, explicitly degraded write
+  rather than an outage.
+- Failed writes normally leave neither metadata nor fragments; ambiguous failures
+  are the only case that intentionally leaves garbage, and the sweep owns it.
+
+**Negative**
+
+- A degraded RS write is not two-failure tolerant until repair completes.
+- A crash between fragment upload and metadata commit leaves orphan fragments.
+- GC is best effort; a crash or unreachable old owner leaves fragments for the
+  task 09 sweep.
+- Replication writes upload five full values, so bandwidth and storage are 5x by
+  design.
+
+### Alternatives considered
+
+- **Commit metadata first, then upload fragments.** Rejected: readers could see a
+  key whose fragments do not exist, and every write would need a second status
+  update to become durable.
+- **Require all five fragments.** Rejected: one unreachable owner would fail the
+  write even though three copies are enough for the Raft quorum and for
+  reconstruction. Degraded writes are the intended compromise.
+- **Require only one fragment.** Rejected: a single stored shard does not satisfy
+  the three-node failure model and would make nearly every partial failure look
+  successful.
+- **Synchronous GC before responding.** Rejected: a dead old owner would delay a
+  write that is already durable and visible.

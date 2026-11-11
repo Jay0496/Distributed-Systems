@@ -2,6 +2,37 @@
 // the StorageService API, forwards client requests to the current Raft leader,
 // and hosts the out-of-band fragment transport used by the redundancy layer.
 //
+// # Write coordinator
+//
+// Put delegates to the leader-side coordinator in write.go. The coordinator
+// validates the request, resolves the effective mode (request, then cluster
+// config, then rs32), allocates the next metadata version with a get_meta Raft
+// read, and derives a unique stripe ID from the key, version, and random bytes.
+//
+// It then encodes five shards (RS(3,2) data and parity, or five full replication
+// copies), places them on five distinct nodes with the deterministic placer, and
+// uploads them concurrently. The leader writes its own shard through the local
+// Store; remote owners receive the versioned fragment stream. Uploads are not
+// cancelled on the first failure because three successes are enough.
+//
+// A write needs three stored fragments. With fewer, the successful uploads are
+// removed and the response is success=false. With three or four, metadata
+// commits with degraded=true. The put_meta command carries only key, stripe ID,
+// mode, size, checksum, version, degraded flag, and placements; it never carries
+// payload bytes. A definite commit rejection deletes the new stripe's fragments.
+// An ambiguous failure retains them for the orphan sweep because the entry may
+// have committed.
+//
+// After a successful overwrite, the coordinator asynchronously deletes the
+// previous stripe's fragments on their owners. The put_meta apply already
+// removed the old stripe and placement metadata rows, so garbage collection is
+// fragment-only, runs after the new metadata commits, and never touches the
+// stripe the write just created.
+//
+// Expected application failures return PutResponse{Success:false, Message}.
+// gRPC status errors are reserved for transport-level failures such as a broken
+// forward, which preserves the existing response shape for clients.
+//
 // # Fragment transport v2
 //
 // Fragments are addressed by the pair (stripe_id, shard_index). The stripe ID

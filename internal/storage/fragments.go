@@ -53,6 +53,12 @@ func (s *SQLiteStore) PutFragment(frag Fragment) error {
 	if err := validateFragmentKey(frag.StripeID, frag.ShardIndex); err != nil {
 		return err
 	}
+	// A replication copy of an empty value is a legitimate zero-length
+	// fragment. database/sql binds a nil []byte as NULL, which violates the
+	// fragments.data NOT NULL constraint, so normalise it to an empty blob.
+	if frag.Data == nil {
+		frag.Data = []byte{}
+	}
 
 	computed := checksumBytes(frag.Data)
 	if frag.Checksum == "" {

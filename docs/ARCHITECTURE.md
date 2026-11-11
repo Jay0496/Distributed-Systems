@@ -92,7 +92,8 @@ removed. See [tests/README.md](../tests/README.md) and
 ## Redundancy and placement
 
 The store supports two global redundancy modes. A per-request mode override is
-allowed; an empty mode resolves to the default, replication.
+allowed. An empty requested mode resolves to the global mode stored through
+Raft, and the cluster default is `rs32` when no configuration has been committed.
 
 | Mode | Fragments | Shard layout | Reconstruct from |
 | --- | --- | --- | --- |
@@ -218,49 +219,117 @@ a newer SQLite state.
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant F as Follower
+    participant F as Receiving node
     participant L as Leader
     participant R as Raft group
-    participant S as Store
+    participant O as Fragment owners
+    participant S as SQLite metadata
 
-    C->>F: Put(key, value, mode)
-    F->>F: validate mode
-    F->>L: Put + metadata x-kv-forwarded=true
-    L->>L: validate mode, check state == Leader
-    L->>R: Apply({op:"put", key, value, mode})
-    R->>R: replicate to quorum, commit
-    R->>S: FSM.Apply on every node
-    L-->>F: PutResponse{success}
-    F-->>C: PutResponse{success}
+    C->>F: Put(key, value, mode?, expected_version?)
+    F->>F: validate key, value, mode, expected_version
+    F->>L: forward Put (x-kv-forwarded=true) when not leader
+    L->>R: Apply(get_meta, key)
+    R-->>L: current version or not found
+    L->>L: resolve effective mode, next version, stripe ID
+    L->>L: encode RS(3,2) shards or five copies
+    L->>L: deterministic five-node placement
+    L->>O: upload five shards concurrently (local owner writes directly)
+    O-->>L: per-shard success or failure
+    L->>L: require at least three stored shards
+    L->>R: Apply(put_meta, metadata only)
+    R->>S: FSM applies metadata on every node
+    L-->>O: asynchronously delete the previous stripe's fragments
+    L-->>F: PutResponse{stripe, mode, version, degraded, shards_stored}
+    F-->>C: PutResponse
 ```
 
-1. The mode is validated before anything else (`""`, `replication`, `rs32`).
-2. If the receiving node is not the leader, `forwardPut` looks up the current
-   leader with `Raft.LeaderWithID()`, maps the leader ID to a gRPC address via
-   `PEERS`, and forwards with `x-kv-forwarded=true`, a 5 s deadline, and one
-   retry on `Unavailable`.
-3. A node that receives a forwarded request but is still not the leader returns
-   `FailedPrecondition` instead of forwarding again, so requests cannot loop.
-4. The leader wraps the request in a `consensus.Command` and calls
-   `Raft.Apply` with a 10 s timeout. The call returns once the entry is
-   committed by a quorum.
-5. `FSM.Apply` runs on all nodes and writes into the local `Store`.
+1. The receiving node validates the key (non-empty, at most 512 bytes, no control
+   characters), the value (non-empty, at most `MAX_VALUE_SIZE`, default 8 MiB),
+   the mode, and `expected_version`. Validation happens before encoding or
+   forwarding.
+2. A follower forwards the request to the current leader with
+   `x-kv-forwarded=true`, a 5 s deadline, and one retry on `Unavailable`. A node
+   that receives a forwarded request and is still not the leader returns
+   `FailedPrecondition`, so requests cannot loop.
+3. The leader resolves the effective mode: a non-empty request override wins,
+   otherwise the global `cluster_config` mode, otherwise `rs32`.
+4. The leader reads the current metadata with a linearizable `get_meta` apply.
+   `expected_version`, when non-zero, must equal the stored version; otherwise the
+   write is rejected without encoding. The new version is `old.Version + 1`, or
+   `1` for a new key.
+5. The stripe ID is `hex(sha256(key || version || 8 random bytes))`. The random
+   suffix keeps rapid overwrites distinct even when the key and version match.
+6. The leader encodes RS(3,2) shards or five full copies and allocates the
+   deterministic five-node placement from the sorted node IDs and the stripe ID
+   hash.
+7. All five uploads run concurrently with one goroutine per shard and a
+   `SHARD_UPLOAD_TIMEOUT` deadline per owner. Shard checksums are verified before
+   upload and again by the transport. The leader writes its own shard through the
+   local `Store` instead of dialing itself. A failed upload never cancels the
+   others, because three successes are sufficient.
+8. The write needs `writeQuorum = 3` durably stored shards or copies. Fewer than
+   three: the successful uploads are deleted and the request is rejected with
+   `success=false`. Three or four: metadata commits with `Degraded=true`. Five:
+   a healthy write. Only after the metadata commit succeeds does the client see
+   `success=true`.
+9. The `put_meta` command contains no payload: key, stripe ID, mode, original
+   size, original-value SHA-256, version, degraded flag, and five placements. A
+   definite rejection (`conflict` or `invalid`) proves the entry was not applied,
+   so the new stripe's fragments are deleted. An ambiguous failure (timeout,
+   leadership loss, connection loss, or an internal apply error) may have
+   committed; the fragments are deliberately retained for the task 09 orphan
+   sweep.
+10. After a successful overwrite, the leader asynchronously deletes the previous
+    stripe's fragments on their owners. The `put_meta` apply already removed the
+    old stripe and placement metadata rows on every node, so garbage collection
+    only removes fragment payloads. It never deletes the stripe the write just
+    created, and it never runs when `put_meta` reports an idempotent retry with
+    the same stripe ID.
 
-The sequence above is the transitional legacy path still used by the server. The
-metadata protocol and FSM commands are implemented, but task 06 switches the
-write path to encode fragments out of band and commit `put_meta`; task 07 does
-the same for reads.
+Metadata version conflicts from concurrent writers are retried once by re-reading
+the version and uploading under a new stripe ID. A request that supplied
+`expected_version` is not retried: the mismatch is the answer.
+
+### Quorum and failure semantics
+
+| Situation | Result |
+| --- | --- |
+| Five shards/copies stored | `success=true`, `degraded=false`, `shards_stored=5` |
+| Three or four stored | `success=true`, `degraded=true`; metadata records the intended five placements; repair is required |
+| Fewer than three stored | `success=false`, no metadata, successful uploads are deleted |
+| Metadata commit definitely rejected (`conflict`, `invalid`) | `success=false`, new stripe fragments deleted |
+| Metadata commit outcome ambiguous (`internal`, timeout, leadership loss) | `success=false`, fragments retained for the orphan sweep |
+| `expected_version` mismatch | `success=false`, no fragments written |
+| Raft apply or request deadline | `success=false`; the caller can retry with the same or a higher expected version |
+
+`writeQuorum = 3` matches the three-node Raft quorum. After a healthy write, any
+three live nodes hold enough shards or copies, so two failures are tolerated by
+both consensus and redundancy. A degraded RS write that stored only three shards
+is readable immediately but does not survive two further failures until repair
+restores the missing shards. Replication degraded writes remain readable through
+any surviving copy.
+
+Every write is coordinated by the single leader, so two leaders cannot allocate
+the same next version concurrently. During a leader change, a stale leader's
+`put_meta` fails or is rejected by the version check; fragments it uploaded are
+orphans that no committed metadata references. The new leader re-reads metadata
+before allocating a version, so the write continues under a fresh stripe ID.
 
 ### Read
 
-Reads use the same path with `{op:"get"}`. A get command is appended to the Raft
-log, committed, and evaluated by the FSM, which returns
+Reads still use the transition path with `{op:"get"}`. A get command is appended
+to the Raft log, committed, and evaluated by the FSM, which returns
 `GetResult{Value, Found, Err}` via `future.Response()`. This gives a
 **linearizable read** without relying on a leader lease or read-index protocol:
 if a read is committed, it observes every write that committed before it.
 
-The cost is that reads consume log space and a round trip through Raft. Log
-compaction (`Snapshot()`) bounds the disk usage.
+Task 07 replaces this with `get_meta` plus fragment gathering and decoding. The
+current read path does not observe metadata-only writes, which is why the write
+tests assert on committed metadata and fragments rather than reading through
+`Get`.
+
+The cost of the legacy read is that reads consume log space and a round trip
+through Raft. Log compaction (`Snapshot()`) bounds the disk usage.
 
 ### Other RPCs
 
@@ -408,19 +477,22 @@ the singleton `cluster_config`, and `raft_state.last_applied_index`.
 Raft snapshots use the FSM's `schema_version: 2` envelope. The metadata section
 covers the `keys`, `stripes`, `placements`, `cluster_config`, and
 `raft_state` tables and deliberately excludes fragment payloads: fragments are
-durable on their owner nodes and repaired from peers when missing. Until task 06
-the FSM still writes the legacy `store` table, so the envelope also carries a
-legacy section. Restore applies both sections in one transaction and still
-accepts version 1 snapshots and the pre-SQLite raw map.
+durable on their owner nodes and repaired from peers when missing. The write path
+no longer writes the legacy `store` table, but the envelope still carries the
+legacy section for upgrade compatibility until task 15. Restore applies both
+sections in one transaction and still accepts version 1 snapshots and the
+pre-SQLite raw map.
 
 The `fragments` table is written by the fragment transport v2 upload handler.
-The client write path does not call that handler until task 06 wires the
-redundancy engines into `Put`; until then fragments are only created by direct
-transport calls and tests.
+The leader write path calls that handler for remote owners and writes its local
+shard directly through `Store.PutFragment`; each healthy stripe therefore leaves
+exactly one fragment on each of the five nodes.
 
 ## Consistency model
 
-- **Writes** are linearizable: they return only after a quorum commits them.
+- **Writes** are linearizable: they return only after a quorum of Raft commits the
+  metadata, and only after at least three shards/copies are durably stored. A
+  write with fewer than five stored is reported as degraded.
 - **Reads** are linearizable: they are committed through the log before being
   served.
 - **Follower reads** are forwarded to the leader, so a follower never serves
@@ -456,19 +528,17 @@ in [DECISIONS.md](DECISIONS.md) (ADR-001).
 
 ## Known limitations
 
-- The server write path still stores the full value through the legacy `put`
-  command in the `store` table. Metadata commands, validation, idempotency, and
-  snapshots are implemented; task 06 wires them into the write path and task 07
-  into reads.
-- The write and read paths do not call the fragment transport yet; task 06
-  wires uploads into `Put` and task 07 wires downloads into `Get`. Fragments are
-  only written to the `fragments` table when the transport is called directly,
-  for example by tests or repair paths.
+- `Get` still uses the transitional legacy `get` command and the `store` table.
+  New metadata-only writes are not visible through `Get`; task 07 replaces the
+  read path with `get_meta` plus fragment gathering and decoding.
+- Automatic repair and failure detection are not implemented yet. Degraded
+  metadata is recorded and old-stripe garbage collection is best effort, but the
+  task 09 repair loop is what restores missing shards and retries failed cleanup.
+- Ambient orphan fragments can remain when a metadata commit is ambiguous or a
+  process dies mid-GC. They are invisible to reads and are removed by the task 09
+  orphan sweep after a grace period.
 - `x-kv-forwarded` prevents loops but assumes `PEERS` is complete and correct.
 - Reads append log entries (no read-index optimisation yet).
-- The redundancy engines and placement are implemented and unit-tested, but the
-  server write/read path does not call them until tasks 06 and 07. Repair is
-  still a scaffold.
 - TLS is optional but not provisioned automatically; the Compose cluster runs
   in plaintext.
 - Raft membership changes go through `Join`; there is no automatic rebalancing.
