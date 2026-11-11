@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -510,6 +511,195 @@ func TestUploadConcurrentSameFragmentRejected(t *testing.T) {
 
 	if got := srv.staging.active(); got != 0 {
 		t.Fatalf("staging active = %d after uploads finished, want 0", got)
+	}
+}
+
+func downloadChunks(t *testing.T, client pb.StorageServiceClient, stripeID string, shardIndex int32) ([]*pb.FragmentChunk, error) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	stream, err := client.DownloadFragment(ctx, &pb.FragmentRequest{StripeId: stripeID, ShardIndex: shardIndex})
+	if err != nil {
+		return nil, err
+	}
+
+	var chunks []*pb.FragmentChunk
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			return chunks, nil
+		}
+		if err != nil {
+			return chunks, err
+		}
+		chunks = append(chunks, chunk)
+	}
+}
+
+// reassemble verifies the wire metadata on every chunk and returns the payload.
+func reassemble(t *testing.T, chunks []*pb.FragmentChunk) []byte {
+	t.Helper()
+
+	var data []byte
+	var totalSize int64
+	for i, chunk := range chunks {
+		if i == 0 {
+			totalSize = chunk.GetTotalSize()
+		}
+		if chunk.GetTotalSize() != totalSize {
+			t.Fatalf("chunk %d total_size = %d, want %d", i, chunk.GetTotalSize(), totalSize)
+		}
+		if chunk.GetOffset() != int64(len(data)) {
+			t.Fatalf("chunk %d offset = %d, want %d", i, chunk.GetOffset(), len(data))
+		}
+		if chunk.GetLast() != (i == len(chunks)-1) {
+			t.Fatalf("chunk %d last = %v", i, chunk.GetLast())
+		}
+		data = append(data, chunk.GetData()...)
+	}
+	if int64(len(data)) != totalSize {
+		t.Fatalf("reassembled %d bytes, want total_size %d", len(data), totalSize)
+	}
+	return data
+}
+
+func TestDownloadStreamsChunks(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{UploadChunkSize: 5}, store)
+
+	data := []byte("a seventeen-byte payload")
+	if _, err := uploadFragment(t, client, "stripe-20", 2, false, data, len(data), false); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	chunks, err := downloadChunks(t, client, "stripe-20", 2)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("downloaded %d chunks, want a multi-chunk stream", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if chunk.GetStripeId() != "stripe-20" || chunk.GetShardIndex() != 2 {
+			t.Fatalf("chunk %d identity = %s/%d", i, chunk.GetStripeId(), chunk.GetShardIndex())
+		}
+		if chunk.GetChecksum() != fragmentChecksum(data) {
+			t.Fatalf("chunk %d checksum = %q", i, chunk.GetChecksum())
+		}
+		if chunk.GetIsParity() {
+			t.Fatalf("chunk %d marked parity", i)
+		}
+	}
+	if got := reassemble(t, chunks); string(got) != string(data) {
+		t.Fatalf("downloaded data = %q, want %q", got, data)
+	}
+}
+
+func TestDownloadUploadRoundTrip(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{UploadChunkSize: 3}, store)
+
+	data := []byte("round-trip payload")
+	if _, err := uploadFragment(t, client, "stripe-21", 0, false, data, 4, false); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	chunks, err := downloadChunks(t, client, "stripe-21", 0)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if got := reassemble(t, chunks); string(got) != string(data) {
+		t.Fatalf("round trip = %q, want %q", got, data)
+	}
+}
+
+func TestDownloadEmptyFragment(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{}, store)
+
+	if _, err := uploadFragment(t, client, "stripe-22", 1, false, nil, 1, false); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	chunks, err := downloadChunks(t, client, "stripe-22", 1)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("downloaded %d chunks for an empty fragment, want 1", len(chunks))
+	}
+	chunk := chunks[0]
+	if len(chunk.GetData()) != 0 || chunk.GetOffset() != 0 || chunk.GetTotalSize() != 0 || !chunk.GetLast() {
+		t.Fatalf("empty fragment chunk = %+v", chunk)
+	}
+	if chunk.GetChecksum() != fragmentChecksum(nil) {
+		t.Fatalf("empty fragment checksum = %q", chunk.GetChecksum())
+	}
+}
+
+func TestDownloadMissingFragment(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{}, store)
+
+	_, err := downloadChunks(t, client, "stripe-23", 0)
+	requireCode(t, err, codes.NotFound)
+}
+
+func TestDownloadCorruptedStoredFragment(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{}, store)
+
+	err := store.PutFragment(storage.Fragment{
+		StripeID:   "stripe-24",
+		ShardIndex: 0,
+		Data:       []byte("corrupt payload"),
+		Checksum:   fragmentChecksum([]byte("original payload")),
+	})
+	if err != nil {
+		t.Fatalf("PutFragment: %v", err)
+	}
+
+	_, err = downloadChunks(t, client, "stripe-24", 0)
+	requireCode(t, err, codes.Internal)
+}
+
+func TestDownloadValidatesIdentity(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{}, store)
+
+	_, err := downloadChunks(t, client, "", 0)
+	requireCode(t, err, codes.InvalidArgument)
+
+	_, err = downloadChunks(t, client, "stripe-25", 5)
+	requireCode(t, err, codes.InvalidArgument)
+}
+
+func TestDownloadHonorsCancellation(t *testing.T) {
+	store := newTestStore()
+	client, _ := newFragmentTestServer(t, config.Config{UploadChunkSize: 1}, store)
+
+	data := make([]byte, 64<<10)
+	if _, err := uploadFragment(t, client, "stripe-26", 0, false, data, len(data), false); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := client.DownloadFragment(ctx, &pb.FragmentRequest{StripeId: "stripe-26", ShardIndex: 0})
+	if err != nil {
+		t.Fatalf("DownloadFragment: %v", err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("first Recv: %v", err)
+	}
+	cancel()
+
+	for {
+		if _, err := stream.Recv(); err != nil {
+			requireCode(t, err, codes.Canceled)
+			return
+		}
 	}
 }
 

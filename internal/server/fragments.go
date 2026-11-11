@@ -256,42 +256,73 @@ func (s *Server) commitFragment(ctx context.Context, id fragmentID, state *uploa
 	return false, nil
 }
 
-// fragmentKey namespaces fragments so they cannot overwrite the base key.
-// Deprecated: the v2 transport addresses fragments by (stripe_id, shard_index).
-// It remains only while the legacy download handler is replaced.
-func fragmentKey(key string, index int32, isParity bool) string {
-	kind := "d"
-	if isParity {
-		kind = "p"
-	}
-	return fmt.Sprintf("%s#%s%d", key, kind, index)
-}
-
-// DownloadFragment streams a stored fragment back to the caller.
-//
-// Deprecated: the legacy key/index lookup is replaced by the v2 stripe-aware
-// download in the next commit. It cannot distinguish data from parity because
-// both namespaces can hold the same index.
+// DownloadFragment streams a stored fragment in bounded chunks after verifying
+// its stored checksum. The legacy key/index fields are ignored.
 func (s *Server) DownloadFragment(req *pb.FragmentRequest, stream pb.StorageService_DownloadFragmentServer) error {
-	if req.GetKey() == "" {
-		return status.Error(codes.InvalidArgument, "fragment key is required")
+	ctx, cancel := context.WithTimeout(stream.Context(), s.cfg.FragmentTimeout)
+	defer cancel()
+
+	if err := validateFragmentID(req.GetStripeId(), req.GetShardIndex()); err != nil {
+		return err
 	}
 
-	for _, isParity := range []bool{false, true} {
-		key := fragmentKey(req.GetKey(), req.GetIndex(), isParity)
-		value, err := s.store.Get(key)
-		if err != nil {
-			continue
+	stripeID := req.GetStripeId()
+	shardIndex := int(req.GetShardIndex())
+	frag, err := s.store.GetFragment(stripeID, shardIndex)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return status.Errorf(codes.NotFound, "fragment %s/%d not found", stripeID, shardIndex)
 		}
+		return status.Errorf(codes.Internal, "read fragment %s/%d: %v", stripeID, shardIndex, err)
+	}
+
+	checksum := frag.Checksum
+	if checksum == "" {
+		checksum = fragmentChecksum(frag.Data)
+	}
+	if !strings.EqualFold(checksum, fragmentChecksum(frag.Data)) {
+		return status.Errorf(codes.Internal,
+			"stored fragment %s/%d failed checksum verification", stripeID, shardIndex)
+	}
+
+	totalSize := int64(len(frag.Data))
+	if totalSize == 0 {
 		return stream.Send(&pb.FragmentChunk{
-			Key:      req.GetKey(),
-			Index:    req.GetIndex(),
-			Data:     value,
-			IsParity: isParity,
+			StripeId:   stripeID,
+			ShardIndex: int32(shardIndex),
+			IsParity:   frag.IsParity,
+			Checksum:   checksum,
+			Offset:     0,
+			TotalSize:  0,
+			Last:       true,
 		})
 	}
 
-	return status.Error(codes.NotFound, "fragment not found")
+	chunkSize := s.cfg.UploadChunkSize
+	for offset := int64(0); offset < totalSize; offset += int64(chunkSize) {
+		if err := ctx.Err(); err != nil {
+			return status.FromContextError(err).Err()
+		}
+
+		end := offset + int64(chunkSize)
+		if end > totalSize {
+			end = totalSize
+		}
+		chunk := &pb.FragmentChunk{
+			StripeId:   stripeID,
+			ShardIndex: int32(shardIndex),
+			IsParity:   frag.IsParity,
+			Checksum:   checksum,
+			Offset:     offset,
+			TotalSize:  totalSize,
+			Data:       frag.Data[offset:end],
+			Last:       end == totalSize,
+		}
+		if err := stream.Send(chunk); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Repair is the entry point for the failure-management subsystem. It is a
