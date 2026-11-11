@@ -42,7 +42,7 @@ func TestRaftSQLiteSnapshotRestore(t *testing.T) {
 
 	for i := 0; i < 20; i++ {
 		key := fmt.Sprintf("sqlite-key-%02d", i)
-		applyCommand(t, node, Command{Op: "put", Key: key, Value: []byte(key)})
+		applyCommand(t, node, Command{Op: OpPut, Legacy: &LegacyOp{Key: key, Value: []byte(key)}})
 	}
 
 	if err := node.Raft.Snapshot().Error(); err != nil {

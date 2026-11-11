@@ -9,23 +9,6 @@ import (
 	"github.com/hashicorp/raft"
 )
 
-// Command represents an operation that will be serialized into the Raft log
-// and later applied to the state machine.
-type Command struct {
-	Op    string // "put" or "get"
-	Mode  string // "replication" or "rs32" (empty means default)
-	Key   string
-	Value []byte
-}
-
-// GetResult is returned by the FSM for "get" commands so that reads can be
-// served from the committed log (linearizable reads).
-type GetResult struct {
-	Value []byte
-	Found bool
-	Err   string
-}
-
 // FSM is the Finite State Machine that Raft uses to apply committed log entries.
 // It is the bridge between the Raft log and the actual key-value store.
 type FSM struct {
@@ -47,10 +30,20 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 	}
 
 	switch cmd.Op {
-	case "put":
-		return f.store.Put(cmd.Key, cmd.Value, false)
-	case "get":
-		value, err := f.store.Get(cmd.Key)
+	case OpPut:
+		// Deprecated: the legacy full-value path remains for compatibility
+		// until task 06 switches the write path to metadata commands.
+		if cmd.Legacy == nil {
+			return &Result{Err: ResultErrInvalid}
+		}
+		return f.store.Put(cmd.Legacy.Key, cmd.Legacy.Value, false)
+	case OpGet:
+		// Deprecated: see OpPut.
+		key := cmd.Key
+		if cmd.Legacy != nil {
+			key = cmd.Legacy.Key
+		}
+		value, err := f.store.Get(key)
 		if err != nil {
 			return &GetResult{Found: false}
 		}

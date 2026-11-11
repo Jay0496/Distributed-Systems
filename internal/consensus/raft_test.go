@@ -147,7 +147,7 @@ func TestRaftClusterReplication(t *testing.T) {
 	leaderIdx := c.waitLeader(t, -1)
 	t.Logf("leader elected: %s", c.ids[leaderIdx])
 
-	applyCommand(t, c.nodes[leaderIdx], Command{Op: "put", Key: "foo", Value: []byte("bar")})
+	applyCommand(t, c.nodes[leaderIdx], Command{Op: OpPut, Legacy: &LegacyOp{Key: "foo", Value: []byte("bar")}})
 
 	for i := 0; i < len(c.stores); i++ {
 		waitForValue(t, c.stores[i], "foo", "bar", 5*time.Second)
@@ -171,7 +171,7 @@ func TestRaftLeaderFailover(t *testing.T) {
 	newLeader := c.waitLeader(t, oldLeader)
 	t.Logf("new leader after failover: %s", c.ids[newLeader])
 
-	applyCommand(t, c.nodes[newLeader], Command{Op: "put", Key: "after-failover", Value: []byte("ok")})
+	applyCommand(t, c.nodes[newLeader], Command{Op: OpPut, Legacy: &LegacyOp{Key: "after-failover", Value: []byte("ok")}})
 
 	for i, node := range c.nodes {
 		if node == nil {
@@ -188,7 +188,7 @@ func TestRaftPersistenceCatchUp(t *testing.T) {
 	c := newTestCluster(t, 3)
 	leaderIdx := c.waitLeader(t, -1)
 
-	applyCommand(t, c.nodes[leaderIdx], Command{Op: "put", Key: "before", Value: []byte("1")})
+	applyCommand(t, c.nodes[leaderIdx], Command{Op: OpPut, Legacy: &LegacyOp{Key: "before", Value: []byte("1")}})
 	for i := range c.stores {
 		waitForValue(t, c.stores[i], "before", "1", 5*time.Second)
 	}
@@ -202,7 +202,7 @@ func TestRaftPersistenceCatchUp(t *testing.T) {
 	c.transports[stopped] = nil
 
 	// Commit more data while it is down.
-	applyCommand(t, c.nodes[leaderIdx], Command{Op: "put", Key: "after", Value: []byte("2")})
+	applyCommand(t, c.nodes[leaderIdx], Command{Op: OpPut, Legacy: &LegacyOp{Key: "after", Value: []byte("2")}})
 	waitForValue(t, c.stores[leaderIdx], "after", "2", 5*time.Second)
 
 	// Restart the follower with the same data directory and a fresh store.
@@ -252,7 +252,7 @@ func TestRaftSnapshotRestore(t *testing.T) {
 
 	for i := 0; i < 20; i++ {
 		key := fmt.Sprintf("key-%02d", i)
-		applyCommand(t, node, Command{Op: "put", Key: key, Value: []byte(key)})
+		applyCommand(t, node, Command{Op: OpPut, Legacy: &LegacyOp{Key: key, Value: []byte(key)}})
 	}
 
 	if err := node.Raft.Snapshot().Error(); err != nil {

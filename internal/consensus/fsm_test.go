@@ -36,11 +36,11 @@ func TestFSMPutAndGet(t *testing.T) {
 	store := newTestStore()
 	fsm := NewFSM(store)
 
-	if ret := applyJSON(t, fsm, Command{Op: "put", Mode: "rs32", Key: "k", Value: []byte("v")}); ret != nil {
+	if ret := applyJSON(t, fsm, Command{Op: OpPut, Legacy: &LegacyOp{Key: "k", Value: []byte("v")}}); ret != nil {
 		t.Fatalf("put returned %v", ret)
 	}
 
-	ret := applyJSON(t, fsm, Command{Op: "get", Key: "k"})
+	ret := applyJSON(t, fsm, Command{Op: OpGet, Key: "k"})
 	result, ok := ret.(*GetResult)
 	if !ok {
 		t.Fatalf("expected *GetResult, got %T", ret)
@@ -53,7 +53,7 @@ func TestFSMPutAndGet(t *testing.T) {
 func TestFSMGetMissingKey(t *testing.T) {
 	fsm := NewFSM(newTestStore())
 
-	ret := applyJSON(t, fsm, Command{Op: "get", Key: "absent"})
+	ret := applyJSON(t, fsm, Command{Op: OpGet, Key: "absent"})
 	result, ok := ret.(*GetResult)
 	if !ok {
 		t.Fatalf("expected *GetResult, got %T", ret)
@@ -84,8 +84,8 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 	store := newTestStore()
 	fsm := NewFSM(store)
 
-	applyJSON(t, fsm, Command{Op: "put", Key: "a", Value: []byte("1")})
-	applyJSON(t, fsm, Command{Op: "put", Key: "b", Value: []byte("2")})
+	applyJSON(t, fsm, Command{Op: OpPut, Legacy: &LegacyOp{Key: "a", Value: []byte("1")}})
+	applyJSON(t, fsm, Command{Op: OpPut, Legacy: &LegacyOp{Key: "b", Value: []byte("2")}})
 
 	snapshot, err := fsm.Snapshot()
 	if err != nil {
