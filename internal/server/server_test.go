@@ -322,28 +322,19 @@ func TestServerConsensusRPCs(t *testing.T) {
 		waitForMetaVersion(t, c, "forwarded-key", 1)
 	})
 
-	t.Run("legacy reads still forward to the leader", func(t *testing.T) {
-		// Task 06 removes payloads from the write path, but Get still serves
-		// the legacy key space until task 07 replaces it. Seed that key space
-		// directly and verify every node's forwarding path.
-		for _, tn := range c.nodes {
-			if err := tn.store.Put("legacy-key", []byte("legacy-value"), false); err != nil {
-				t.Fatalf("%s seed legacy value: %v", tn.id, err)
-			}
-		}
-		waitForValue(t, c, "legacy-key", "legacy-value")
+	t.Run("reads forward to the leader and gather fragments", func(t *testing.T) {
+		mustPut(t, leader.client, "read-key", "read-value", "rs32")
+		waitForMetaVersion(t, c, "read-key", 1)
+		waitForValue(t, c, "read-key", "read-value")
 	})
 
 	t.Run("missing key is reported as not found", func(t *testing.T) {
 		ctx, cancel := ctxWithTimeout(t, 5*time.Second)
 		defer cancel()
 
-		resp, err := leader.client.Get(ctx, &pb.GetRequest{Key: "does-not-exist"})
-		if err != nil {
-			t.Fatalf("Get failed: %v", err)
-		}
-		if resp.GetSuccess() {
-			t.Fatalf("expected success=false for a missing key, got %+v", resp)
+		_, err := leader.client.Get(ctx, &pb.GetRequest{Key: "does-not-exist"})
+		if status.Code(err) != codes.NotFound {
+			t.Fatalf("expected NotFound for a missing key, got %v", err)
 		}
 	})
 

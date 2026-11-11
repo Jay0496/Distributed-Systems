@@ -142,7 +142,7 @@ func (s *Server) forwardGet(ctx context.Context, req *pb.GetRequest) (*pb.GetRes
 
 	target, ok := s.leaderGRPCAddr()
 	if !ok {
-		return &pb.GetResponse{Success: false}, nil
+		return nil, status.Error(codes.Unavailable, "not the leader and no leader is known")
 	}
 
 	var lastErr error
@@ -162,12 +162,13 @@ func (s *Server) forwardGet(ctx context.Context, req *pb.GetRequest) (*pb.GetRes
 			return resp, nil
 		}
 		lastErr = err
+		// Application and integrity statuses from the leader are the answer;
+		// only an unavailable transport is retried.
 		if status.Code(err) != codes.Unavailable {
-			break
+			return nil, err
 		}
 		s.dropConn(target)
 	}
 
-	_ = lastErr
-	return &pb.GetResponse{Success: false}, nil
+	return nil, status.Errorf(codes.Unavailable, "forward read to leader %s failed: %v", target, lastErr)
 }
