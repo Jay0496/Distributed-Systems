@@ -3,7 +3,6 @@ package consensus
 import (
 	"encoding/json"
 	"errors"
-	"io"
 
 	"distributed-kv-store/internal/redundancy"
 	"distributed-kv-store/internal/storage"
@@ -203,46 +202,3 @@ func (f *FSM) currentResult(cmd Command) *Result {
 func defaultClusterConfig() storage.ClusterConfig {
 	return storage.ClusterConfig{DefaultMode: string(redundancy.ModeRS32)}
 }
-
-// Snapshot returns a snapshot of the current state.
-func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
-	var data []byte
-	if snapshotter, ok := f.store.(storage.Snapshotter); ok {
-		var err error
-		data, err = snapshotter.Snapshot()
-		if err != nil {
-			return nil, err
-		}
-	}
-	return &fsmSnapshot{data: data}, nil
-}
-
-// Restore restores the state from a snapshot.
-func (f *FSM) Restore(rc io.ReadCloser) error {
-	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		return err
-	}
-
-	snapshotter, ok := f.store.(storage.Snapshotter)
-	if !ok {
-		return nil
-	}
-	return snapshotter.Restore(data)
-}
-
-type fsmSnapshot struct {
-	data []byte
-}
-
-func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
-	if _, err := sink.Write(s.data); err != nil {
-		_ = sink.Cancel()
-		return err
-	}
-	return sink.Close()
-}
-
-func (s *fsmSnapshot) Release() {}
