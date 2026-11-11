@@ -10,6 +10,7 @@
 | ADR-006 | Use RS(3,2) and five-copy replication on a five-node cluster | Accepted |
 | ADR-007 | Keep Raft metadata-only and move fragments out of band | Accepted |
 | ADR-008 | Write fragments before metadata and require a three-shard quorum | Accepted |
+| ADR-009 | Leader-coordinated verified reads with asynchronous read repair | Accepted |
 
 ---
 
@@ -81,31 +82,40 @@ leader lease, the read-index protocol, or committing the read itself.
 
 ### Decision
 
-`Get` is a Raft command (`{"op":"get","key":...}`) applied by the FSM, which
-returns a `GetResult` to the caller. Followers forward reads to the leader; they
-never answer from local state. Reads are linearizable because the returned value
-is produced by an entry that committed after every previously committed write.
+`Get` applies a metadata-only `get_meta` command through Raft, then gathers and
+verifies fragments from the owners recorded in that metadata. Followers forward
+reads to the leader; they never answer from local state. Reads are linearizable
+because the metadata that selects the stripe and placements is produced by an
+entry that committed after every previously committed write, and the returned
+bytes must match that metadata's size and SHA-256 checksum.
 
 ### Rationale
 
 - Correctness is obvious and easy to test: a read that returns has passed through
-  the same commit path as a write.
+  the same metadata commit path as a write, then verified the payload against
+  the committed checksum.
 - No clock assumptions, no lease renewal, no extra `ReadIndex` RPC to implement.
-- The FSM already needs a `get` code path for tests and internal inspection.
+- Metadata reads are small and carry no payload, so the log and snapshots stay
+  bounded even when values are large.
 
 ### Consequences
 
 **Positive**
 
 - Strongest practical consistency guarantee for a course project.
-- Symmetric with writes: one code path, one failure model, one set of timeouts.
+- Symmetric with writes: one leader, one metadata commit path, one set of
+  timeouts.
+- Payload bytes stay out of Raft; reads gather only the shards or copies they
+  need and can repair failed placements afterwards.
 
 **Negative**
 
-- Every read appends a log entry: extra disk I/O, extra replication traffic, and
-  log growth that must be bounded by snapshots.
-- Read latency includes a Raft round trip, even for hot keys.
-- A single-node cluster still writes to BoltDB for each read.
+- Every read appends a small metadata entry: extra disk I/O and replication
+  traffic, bounded by snapshots.
+- Read latency includes a Raft round trip plus fragment fetches, even for hot
+  keys.
+- The leader coordinates all reads for now. A future read-index or lease read
+  can replace this without changing the public API.
 
 ### Alternatives considered
 
@@ -553,3 +563,99 @@ Cleanup depends on what the commit outcome proves:
   successful.
 - **Synchronous GC before responding.** Rejected: a dead old owner would delay a
   write that is already durable and visible.
+
+---
+
+## ADR-009: Leader-coordinated verified reads with asynchronous read repair
+
+**Date:** 2026-11-11
+**Status:** Accepted
+
+### Context
+
+After the metadata-only write path, values live in node-local fragments rather
+than in the Raft FSM or the legacy `store` table. A read must choose a stripe
+from committed metadata, gather enough fragments from five independent owners,
+verify them, and cope with missing or corrupt placements without returning
+unverified bytes. Repair must not race an overwrite and resurrect a superseded
+stripe.
+
+### Decision
+
+The leader coordinates reads:
+
+1. Apply `get_meta` through Raft so the stripe, mode, placements, size, and
+   checksum are linearizable.
+2. Fetch fragments concurrently with bounded parallelism and a per-owner
+   timeout. Read the leader's own placement from SQLite instead of dialing
+   loopback.
+3. For RS, accept any three valid shards; for replication, accept the first
+   copy that matches the value checksum. A degraded stripe fetches all five
+   placements so repair can see every failure.
+4. Verify each shard's SHA-256 before decode and the original value's size and
+   SHA-256 after decode. If decode does not verify, fetch any remaining
+   placements and try other subsets. Never return unverified or padded bytes.
+5. Enqueue failed placements on a bounded asynchronous read-repair queue. The
+   worker re-reads metadata, drops the task unless the key still points at the
+   same stripe ID and version, re-encodes the verified value, and uploads only
+   the missing/corrupt shards to their intended owners. Corrupt copies use
+   `replace=true`; missing shards use the ordinary upload.
+6. Read repair does not clear `metadata.degraded` in this task; task 09 owns the
+   final all-five-present check.
+
+`ReadVerified(ctx, meta)` exposes the same verified gather path to the repair
+subsystem without enqueuing repair or writing metadata. `internal/cluster` owns
+the queue interface and never imports `internal/server`.
+
+### Rationale
+
+- Metadata is the visibility point and the checksum is the integrity contract.
+  Reading metadata through Raft keeps reads linearizable without a lease or
+  read-index implementation in this task.
+- Three RS shards or one replication copy are sufficient by design, so one or
+  two unreachable owners should degrade latency, not availability.
+- Verifying the final value checksum is essential: three individually valid RS
+  shards can still disagree. Trying more subsets is the only way to distinguish
+  a bad shard from a bad metadata record, and `DataLoss` is safer than returning
+  bytes that do not verify.
+- Read repair is asynchronous because a successful read is already durable. A
+  slow or dead owner must not turn a good read into a timeout, and a bounded
+  queue prevents a failure storm from exhausting memory.
+- Re-reading metadata before repair is the race-safety rule. Stripe IDs are
+  immutable, so a task that still matches key, stripe, and version can safely
+  write only the failed placements.
+
+### Consequences
+
+**Positive**
+
+- Reads tolerate any two missing/corrupt shards after a healthy write.
+- Corrupt or missing fragments are restored after a successful read without
+  blocking the client.
+- Raft stays metadata-only; read traffic does not put values in the log.
+- The same verified gather path is reusable by the task 09 repairer.
+
+**Negative**
+
+- The leader carries all read coordination CPU and network load for now.
+- Read repair is best effort: queue saturation, a crash, or a leader change can
+  drop a task, leaving the next read to retry it. Task 09 adds scheduling,
+  retries, and backoff.
+- A degraded stripe still sets `degraded=true` after read repair until task 09
+  performs the all-five-present check.
+- Reads still append a small metadata entry; read-index or lease reads are future
+  work.
+
+### Alternatives considered
+
+- **Read the local FSM value.** Rejected: values are no longer in the FSM, and a
+  follower would return stale data.
+- **Follower-local reads.** Rejected for this task: requires lease or read-index
+  machinery and would complicate the failure story.
+- **Synchronous read repair.** Rejected: a dead owner would delay a read whose
+  value is already verified.
+- **Repair every placement on every read.** Rejected: multiplies traffic and
+  defeats the early-completion rule, except for degraded stripes where full
+  inspection is required.
+- **Clear `degraded` from the read path.** Rejected: it would create a metadata
+  version/status race and duplicate task 09's all-five-present check.

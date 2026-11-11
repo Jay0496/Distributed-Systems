@@ -2,11 +2,11 @@ package server
 
 import (
 	"context"
-	"encoding/json"
+	"math/rand"
 	"strconv"
 	"sync"
-	"time"
 
+	"distributed-kv-store/internal/cluster"
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/consensus"
 	"distributed-kv-store/internal/redundancy"
@@ -16,6 +16,8 @@ import (
 
 	"github.com/hashicorp/raft"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Server is the gRPC front end for one storage node. It holds the local store,
@@ -39,6 +41,15 @@ type Server struct {
 	// placer maps stripe shards to deterministic owners. A nil placer uses the
 	// default deterministic hash placer.
 	placer redundancy.Placer
+
+	// readMu guards readRand, which shuffles RS owner fetch order. Tests may
+	// assign a fixed-seed source before issuing reads.
+	readMu   sync.Mutex
+	readRand *rand.Rand
+
+	// repairQueue runs asynchronous read repair. It is bounded and never
+	// blocks a client read; task 09 replaces it with the shared repair queue.
+	repairQueue cluster.RepairQueue
 }
 
 // New builds a Server with its connection cache and dialer.
@@ -60,7 +71,21 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 	// The method value is bound after construction so Server can own the
 	// default apply implementation without a package-level helper.
 	srv.apply = srv.applyRaft
+	srv.repairQueue = cluster.NewRepairQueue(
+		cfg.ReadRepairWorkers,
+		readRepairQueueCapacity,
+		cfg.WriteTimeout,
+		srv.performReadRepair,
+	)
 	return srv
+}
+
+// Close stops background repair workers. It is safe to call more than once.
+func (s *Server) Close() error {
+	if s.repairQueue != nil {
+		s.repairQueue.Close()
+	}
+	return nil
 }
 
 // Put validates the request, forwards to the leader when necessary, and runs
@@ -84,33 +109,18 @@ func (s *Server) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, 
 	return s.write(ctx, req)
 }
 
-// Get forwards to the leader when necessary and serves a linearizable read from
-// the committed Raft log.
+// Get forwards to the leader when necessary. The leader reads metadata through
+// Raft and then gathers, verifies, and decodes fragments in read.go.
 func (s *Server) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
+	if s.node == nil || s.node.Raft == nil {
+		return nil, status.Error(codes.Internal, "raft node is not configured")
+	}
+
 	// Followers transparently forward reads to the current leader.
 	if s.node.Raft.State() != raft.Leader {
 		return s.forwardGet(ctx, req)
 	}
-
-	// Reads go through the Raft log so they observe all previously committed
-	// writes (linearizable reads).
-	// TODO(task 06): read metadata through Raft and gather fragments locally.
-	cmd := consensus.Command{Op: consensus.OpGet, Key: req.GetKey()}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return &pb.GetResponse{Success: false}, nil
-	}
-
-	future := s.node.Raft.Apply(data, 10*time.Second)
-	if err := future.Error(); err != nil {
-		return &pb.GetResponse{Success: false}, nil
-	}
-
-	result, ok := future.Response().(*consensus.GetResult)
-	if !ok || !result.Found || result.Err != "" {
-		return &pb.GetResponse{Success: false}, nil
-	}
-	return &pb.GetResponse{Success: true, Value: result.Value}, nil
+	return s.read(ctx, req)
 }
 
 // Heartbeat is the legacy liveness probe kept for compatibility. Real health

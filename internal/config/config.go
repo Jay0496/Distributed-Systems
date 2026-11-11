@@ -32,6 +32,15 @@ const (
 	DefaultShardUploadTimeout = 5 * time.Second
 )
 
+// Read path defaults. READ_TIMEOUT bounds one owner fetch, READ_PARALLELISM
+// bounds concurrent owner fetches, and READ_REPAIR_WORKERS bounds the
+// asynchronous read-repair worker pool.
+const (
+	DefaultReadTimeout       = 5 * time.Second
+	DefaultReadParallelism   = 5
+	DefaultReadRepairWorkers = 2
+)
+
 // Config holds the runtime configuration for a single storage node.
 type Config struct {
 	NodeID     string
@@ -68,6 +77,14 @@ type Config struct {
 	// ShardUploadTimeout bounds one shard upload to one owner (default 5s).
 	ShardUploadTimeout time.Duration
 
+	// ReadTimeout bounds one owner fragment fetch (default 5s).
+	ReadTimeout time.Duration
+	// ReadParallelism bounds concurrent owner fragment fetches (default 5).
+	ReadParallelism int
+	// ReadRepairWorkers bounds the asynchronous read-repair worker pool
+	// (default 2).
+	ReadRepairWorkers int
+
 	// BootstrapServers maps Raft server ID -> Raft address.
 	BootstrapServers map[string]string
 	// Peers maps Raft server ID -> gRPC address.
@@ -92,6 +109,9 @@ func Load() Config {
 		MaxValueSize:       intOr("MAX_VALUE_SIZE", DefaultMaxValueSize),
 		WriteTimeout:       durationOr("WRITE_TIMEOUT", DefaultWriteTimeout),
 		ShardUploadTimeout: durationOr("SHARD_UPLOAD_TIMEOUT", DefaultShardUploadTimeout),
+		ReadTimeout:        durationOr("READ_TIMEOUT", DefaultReadTimeout),
+		ReadParallelism:    intOr("READ_PARALLELISM", DefaultReadParallelism),
+		ReadRepairWorkers:  intOr("READ_REPAIR_WORKERS", DefaultReadRepairWorkers),
 		Bootstrap:          os.Getenv("BOOTSTRAP") == "true",
 		JoinAddr:           os.Getenv("JOIN_ADDR"),
 		TLSEnabled:         os.Getenv("TLS_ENABLED") == "true",
@@ -128,6 +148,15 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.ShardUploadTimeout <= 0 {
 		c.ShardUploadTimeout = DefaultShardUploadTimeout
+	}
+	if c.ReadTimeout <= 0 {
+		c.ReadTimeout = DefaultReadTimeout
+	}
+	if c.ReadParallelism <= 0 {
+		c.ReadParallelism = DefaultReadParallelism
+	}
+	if c.ReadRepairWorkers <= 0 {
+		c.ReadRepairWorkers = DefaultReadRepairWorkers
 	}
 	return c
 }

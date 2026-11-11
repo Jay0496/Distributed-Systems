@@ -141,11 +141,18 @@ func (s *Server) pushShards(ctx context.Context, stripeID string, shards []redun
 	return stored
 }
 
-// pushShard stores one shard at its owner. The leader writes its own shards
-// directly through the same Store repository; remote owners receive the
-// versioned fragment stream. A checksum mismatch is rejected before any bytes
-// leave the process.
+// pushShard stores one shard at its owner during a normal write. Repair uses
+// pushShardWithReplace so it can overwrite a corrupt copy explicitly.
 func (s *Server) pushShard(ctx context.Context, stripeID string, shard redundancy.Shard, placement storage.ShardPlacement) error {
+	return s.pushShardWithReplace(ctx, stripeID, shard, placement, false)
+}
+
+// pushShardWithReplace stores one shard at its owner. The leader writes its own
+// shards directly through the same Store repository; remote owners receive the
+// versioned fragment stream. A checksum mismatch is rejected before any bytes
+// leave the process. replace is reserved for repair and allows the transport to
+// overwrite an existing fragment with a different checksum.
+func (s *Server) pushShardWithReplace(ctx context.Context, stripeID string, shard redundancy.Shard, placement storage.ShardPlacement, replace bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -195,6 +202,7 @@ func (s *Server) pushShard(ctx context.Context, stripeID string, shard redundanc
 			Offset:     0,
 			TotalSize:  0,
 			Last:       true,
+			Replace:    replace,
 		}); err != nil {
 			_ = stream.CloseSend()
 			return fmt.Errorf("send empty shard %d: %w", shard.Index, err)
@@ -218,6 +226,7 @@ func (s *Server) pushShard(ctx context.Context, stripeID string, shard redundanc
 				TotalSize:  total,
 				Data:       shard.Data[offset:end],
 				Last:       end == len(shard.Data),
+				Replace:    replace,
 			}
 			if err := stream.Send(chunk); err != nil {
 				_ = stream.CloseSend()

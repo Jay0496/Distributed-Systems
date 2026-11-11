@@ -1,11 +1,15 @@
 package support
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"testing"
 	"time"
 
 	"distributed-kv-store/internal/consensus"
+
+	pb "distributed-kv-store/proto"
 
 	"github.com/hashicorp/raft"
 )
@@ -28,6 +32,31 @@ func WaitForLeader(nodes []*consensus.Node, timeout time.Duration) (*consensus.N
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// Get sends a read to the current leader and returns the RPC result, including
+// application and integrity status errors.
+func (c *Cluster) Get(t testing.TB, key string) (*pb.GetResponse, error) {
+	t.Helper()
+	leader, err := c.WaitLeader(10 * time.Second)
+	if err != nil {
+		t.Fatalf("support: %v", err)
+	}
+	return c.GetVia(t, leader.ID, key)
+}
+
+// GetVia sends a read through a specific node, exercising forwarding.
+func (c *Cluster) GetVia(t testing.TB, nodeID, key string) (*pb.GetResponse, error) {
+	t.Helper()
+	c.mu.RLock()
+	n, ok := c.byID[nodeID]
+	c.mu.RUnlock()
+	if !ok {
+		t.Fatalf("support: unknown node %q", nodeID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return n.Client.Get(ctx, &pb.GetRequest{Key: key})
 }
 
 // ApplyRawToLeader waits for a leader and applies the raw command bytes through
