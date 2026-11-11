@@ -2,7 +2,6 @@ package server
 
 import (
 	"fmt"
-	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -84,10 +83,4 @@ func validatePut(key string, value []byte, mode string, expectedVersion int64, m
 		return fmt.Errorf("expected_version must not be negative, got %d", expectedVersion)
 	}
 	return nil
-}
-
-// normalizeModeString trims a mode for logging without accepting whitespace as
-// a distinct mode value.
-func normalizeModeString(mode string) string {
-	return strings.TrimSpace(mode)
 }
