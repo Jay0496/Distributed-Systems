@@ -36,6 +36,10 @@ type Server struct {
 	// apply is the Raft Apply seam used by the write coordinator. Tests
 	// replace it to force definite and ambiguous commit outcomes.
 	apply applyFunc
+
+	// placer maps stripe shards to deterministic owners. A nil placer uses the
+	// default deterministic hash placer.
+	placer redundancy.Placer
 }
 
 // New builds a Server with its connection cache and dialer.
@@ -52,6 +56,7 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 		conns:   make(map[string]*grpc.ClientConn),
 		dial:    dial,
 		staging: newFragmentStaging(),
+		placer:  redundancy.NewPlacer(),
 	}
 	// The method value is bound after construction so Server can own the
 	// default apply implementation without a package-level helper.
