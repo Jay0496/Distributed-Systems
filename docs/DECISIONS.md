@@ -7,6 +7,7 @@
 | ADR-003 | Make TLS optional and off by default | Accepted |
 | ADR-004 | Static full-cluster bootstrap plus a dynamic `Join` RPC | Accepted |
 | ADR-005 | Domain-oriented `cmd/` and `internal/` package layout | Accepted |
+| ADR-006 | Use RS(3,2) and five-copy replication on a five-node cluster | Accepted |
 
 ---
 
@@ -282,3 +283,76 @@ packages under `internal/`:
   handlers.
 - **Move everything to `pkg/`.** Rejected: nothing here is intended for external
   consumption, so `internal/` communicates the boundary more accurately.
+
+---
+
+## ADR-006: Use RS(3,2) and five-copy replication on a five-node cluster
+
+**Date:** 2026-11-10
+**Status:** Accepted
+
+### Context
+
+The cluster has exactly five storage nodes, and Raft needs a quorum of three to
+make progress. The redundancy layer can either erasure-code each value or keep
+full copies. A 3x replication scheme is common in larger clusters but leaves two
+of the five nodes without a fragment, so a stripe would not use the whole
+cluster and the failure story would not line up with the five-node topology.
+
+### Decision
+
+Support exactly two modes, both of which produce five fragments per stripe:
+
+- `rs32`: Reed-Solomon with three data shards and two parity shards, using the
+  global indices `0,1,2` for data and `3,4` for parity.
+- `replication`: five full copies, global indices `0..4`, every index data.
+
+Each stripe places its five fragments on five distinct nodes with deterministic
+hash rotation. The default mode is replication; an empty per-request mode
+resolves to that default. Do not implement a 3x replication mode.
+
+### Rationale
+
+- Five fragments on five nodes means any three live nodes hold enough fragments
+  to satisfy both the Raft quorum and stripe reconstruction, so two node
+  failures are survivable after a healthy write.
+- RS(3,2) stores `5 * ceil(size/3)` bytes, about 1.67x the value (about 67%
+  extra), while five-copy replication stores `5 * size` bytes (400% extra).
+  RS is the economical mode; replication is the simple, fast mode used for
+  comparison and for cases where every node should hold a complete value.
+- Indices are global and mode-aware, so metadata can say whether a fragment is
+  parity without re-reading the mode. In replication mode indices 3 and 4 are
+  data, not parity.
+- Both modes benefit from the same checksum and placement rules, which keeps
+  repair and read repair simple: a fragment is either valid against its SHA-256
+  checksum and owner, or it is missing/corrupt.
+
+### Consequences
+
+**Positive**
+
+- The redundancy degree matches the five-node cluster and the 3/5 Raft quorum.
+- Storage measurements have a clear baseline: RS is ~1.67x total, replication
+  is 5x total.
+- A deterministic placer makes fragment ownership reproducible across leaders
+  and restarts.
+
+**Negative**
+
+- RS adds encode/decode CPU and a dependency on `klauspost/reedsolomon`.
+- A degraded RS write may store only three shards; those three do not
+  necessarily survive two further failures, so repair is urgent after a degraded
+  write.
+- An empty value is a storage-math exception: RS uses five one-byte shards
+  (5 bytes) because Reed-Solomon cannot encode zero-length shards, while
+  replication uses zero bytes.
+
+### Alternatives considered
+
+- **3x replication.** Rejected: it uses only three of five nodes, leaves no
+  fragment on two nodes, and does not match the five-node failure model.
+- **RS(2,1) or RS(2,2).** Rejected: the task specifies RS(3,2), and five shards
+  map cleanly one-per-node.
+- **Per-shard Raft groups or multi-Raft.** Out of scope for the course project;
+  metadata-only Raft plus out-of-band fragment transfer is the agreed design.
+

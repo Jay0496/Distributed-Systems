@@ -65,7 +65,7 @@ internal/config      environment parsing and validation
 internal/server      gRPC handlers, forwarding, fragment transport
 internal/consensus   Raft node, FSM, metadata commands
 internal/storage     Store interface, SQLite metadata/fragment/config repositories
-internal/redundancy  redundancy-engine seam and mode validation (no-op today)
+internal/redundancy  RS(3,2), five-copy replication, checksums, deterministic placement
 internal/gateway     consistent-hash router
 internal/cluster     failure detection and repair (created now, populated later)
 
@@ -83,9 +83,55 @@ Dependency direction:
 - `tests/support` is test-only; production packages must not import it.
 
 The package move was behaviour-preserving. `internal/storage.MockStore` was
-removed from production in the SQLite task and now lives in `tests/support`;
-`internal/redundancy.NoopRedundancy` remains a documented temporary placeholder
-for the redundancy task. See [tests/README.md](../tests/README.md).
+removed from production in the SQLite task and now lives in `tests/support`.
+`internal/redundancy` now contains the real RS(3,2) and five-copy replication
+engines, checksums, and deterministic placement; the no-op placeholder was
+removed. See [tests/README.md](../tests/README.md) and
+[internal/redundancy/README.md](../internal/redundancy/README.md).
+
+## Redundancy and placement
+
+The store supports two global redundancy modes. A per-request mode override is
+allowed; an empty mode resolves to the default, replication.
+
+| Mode | Fragments | Shard layout | Reconstruct from |
+| --- | --- | --- | --- |
+| `rs32` | 5 | indices `0,1,2` data, `3,4` parity | any 3 distinct shards |
+| `replication` | 5 | five full copies, indices `0..4` | any 1 valid copy |
+
+RS(3,2) uses `shardSize = max(1, ceil(size/3))`. The value is copied into the
+three data shards, the final shard is zero-padded, and two parity shards are
+computed with `github.com/klauspost/reedsolomon`. Decode accepts any three to
+five distinct shards, verifies every supplied SHA-256 shard checksum before
+reconstruction, rejects duplicate or out-of-range indices and inconsistent
+`TotalSize` values, reconstructs at most two missing shards, verifies the parity
+matrix, then truncates the concatenated data shards to the original size so
+padding never leaks into the result. An empty value is encoded as five one-byte
+zero shards.
+
+Replication stores five full copies. Decode returns the first copy with a valid
+length and checksum and skips corrupt copies when a good copy exists; if none is
+valid, it returns an error listing the mismatches instead of a corrupted value.
+
+Placement is deterministic and mode-aware. The placer sorts the node IDs,
+computes `offset = FNV-1a(stripeID) % len(nodes)`, and assigns shard `i` to
+`nodes[(offset+i) % len(nodes)]`. It requires exactly five shards and at least
+five distinct node IDs. RS indices 3 and 4 are marked parity; every replication
+index is data. With five nodes a stripe therefore uses five distinct nodes and
+the hash rotation balances ownership across stripes.
+
+Storage math for a non-empty value of `size` bytes:
+
+```text
+RS(3,2) total      = 5 * ceil(size/3)  ~= 1.67x  (about 67% extra)
+replication total  = 5 * size          =  5.00x  (400% extra)
+```
+
+The empty-value exception is five 1-byte RS shards (5 bytes) versus zero bytes
+for replication. After a healthy write, any three live nodes hold enough
+fragments to satisfy both the Raft quorum and reconstruction, so two node
+failures are tolerated. The engines are unit-tested now; tasks 06 and 07 wire
+them into the fragment write and read paths.
 
 ## Request path
 
@@ -232,7 +278,9 @@ in [DECISIONS.md](DECISIONS.md) (ADR-001).
   integrated, although the SQLite tables and repository APIs exist.
 - `x-kv-forwarded` prevents loops but assumes `PEERS` is complete and correct.
 - Reads append log entries (no read-index optimisation yet).
-- Reed-Solomon encoding (`rs32`) and repair are interfaces/scaffolds only.
+- The redundancy engines and placement are implemented and unit-tested, but the
+  server write/read path does not call them until tasks 06 and 07. Repair is
+  still a scaffold.
 - TLS is optional but not provisioned automatically; the Compose cluster runs
   in plaintext.
 - Raft membership changes go through `Join`; there is no automatic rebalancing.

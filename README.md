@@ -14,7 +14,7 @@ each node keeps its own persistent Raft log on disk.
 | Raft consensus, snapshots, forwarding, gRPC surface | Jay Savaliya | Complete for this phase |
 | CLI / routing gateway | Khalid | In progress (`cmd/gateway/`, `internal/gateway/`) |
 | SQLite persistence | Parth | Complete for this task (`internal/storage/`, `node.db`) |
-| Failure management / Reed-Solomon redundancy | Dhruvin | Interface scaffolded (`internal/redundancy`, `internal/server/fragments.go`) |
+| Failure management / Reed-Solomon redundancy | Dhruvin | Engines and placement implemented (`internal/redundancy`); write-path integration in task 06 |
 
 The server opens the production SQLite `storage.Store` before Raft starts and
 closes it after Raft and gRPC stop. The database lives at `STORE_PATH`
@@ -49,7 +49,7 @@ state layout, and recovery behaviour. Design trade-offs are recorded in
 | `internal/server/` | gRPC handlers: `Put`, `Get`, `Heartbeat`, `Join`, `NodeStatus`, fragments, repair |
 | `internal/server/forward.go` | Leader discovery, cached client connections, one-hop forwarding, retry and loop guard |
 | `internal/server/fragments.go` | `UploadFragment`, `DownloadFragment`, `Repair` handlers |
-| `internal/redundancy/` | `RedundancyEngine` seam (no-op today) and redundancy-mode validation |
+| `internal/redundancy/` | RS(3,2), five-copy replication, shard checksums, deterministic five-node placement |
 | `internal/consensus/raft.go` | Raft node: BoltDB log/stable store, file snapshots, bootstrap, `AddVoter`, `Close` |
 | `internal/consensus/fsm.go` | FSM: put/get commands, real snapshot and restore |
 | `internal/storage/` | `Store` interface, SQLite metadata/fragment/config repositories, snapshots |
@@ -119,8 +119,11 @@ docker compose down -v     # deletes data volumes
 | `Repair(key)` | Scaffold for failure-management reconstruction |
 
 `mode` accepts `""` (default), `"replication"`, or `"rs32"`; anything else is
-rejected before it reaches Raft. `"rs32"` currently behaves like replication
-until the redundancy engine lands.
+rejected before it reaches Raft. The RS(3,2) and five-copy replication engines
+are implemented and unit-tested in `internal/redundancy`, but the transitional
+server still commits full values through the FSM until tasks 06 and 07 wire them
+into the fragment write and read paths. See
+[internal/redundancy/README.md](internal/redundancy/README.md).
 
 ## Tests
 
@@ -182,5 +185,6 @@ stop the node and remove `node.db` and its `-wal`/`-shm` files.
 
 - Wire the CLI/gateway routing layer to the gRPC API.
 - Move the Raft log to metadata-only commands and integrate the fragment write/read path.
-- Implement Reed-Solomon `rs32` encoding in `internal/redundancy` and real repair in `internal/server/fragments.go`.
+- Integrate the implemented RS(3,2)/five-copy engines into the fragment
+  write/read path and implement real repair in `internal/server/fragments.go`.
 - Add certificate provisioning for the optional TLS mode.
