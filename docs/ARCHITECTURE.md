@@ -418,6 +418,50 @@ the leader's status unchanged; only `Unavailable` is retried once.
 | `StatFragment` | Reports fragment size and checksum without a payload. |
 | `Repair` | Validates the key and returns a scaffold message; reconstruction belongs to the failure-management subsystem. |
 | `Heartbeat` | Legacy liveness RPC. Real health checks use `grpc.health.v1`. |
+| `Delete` | Leader commits `delete_meta`, then garbage-collects the old stripe's fragments. Missing keys are idempotent. |
+| `GetConfig` / `SetConfig` | Leader-forwarded global mode read and write through Raft. |
+| `ClusterHealth` | Leader-forwarded on-demand health and degraded-state snapshot. |
+| `Stats` | Local-only key, stripe, fragment, byte, mode, and uptime counters. |
+
+### Admin and configuration API
+
+The admin surface makes runtime mode changes, deletion, and self-observation
+available without restarting nodes.
+
+| RPC | Where it runs | Behaviour |
+| --- | --- | --- |
+| `GetConfig` | Leader (followers forward) | Applies `get_config` through Raft, so the returned mode observes all committed configuration changes. The FSM returns `rs32` when no config row exists. |
+| `SetConfig` | Leader (followers forward) | Validates `default_mode` (`rs32` or `replication`; empty is rejected), commits `set_config`, and waits for the apply. Configuration lives in SQLite and in the Raft snapshot. |
+| `Delete` | Leader (followers forward) | Commits `delete_meta` with the optional expected version atomically, then deletes the stripe's fragments on every owner from the returned `Placement`. Metadata always commits first. A missing key returns `success=true, found=false`; a version mismatch returns `Aborted`. |
+| `Stats` | Any node, local only | Reports `node_id`, mode, leader flag, keys, stripes, fragments, SQLite+WAL+SHM bytes, repair counters, and uptime. Repair counters and depth are zero until task 09 supplies the shared repair queue. |
+| `ClusterHealth` | Leader (followers forward) | Lists the Raft voters, probes each one in parallel with `NodeStatus` and `Stats`, and aggregates the result. |
+
+**Config precedence.** A write uses the request's non-empty `mode`, otherwise
+the committed cluster configuration, otherwise `rs32`. `SetConfig` changes only
+the second tier, so per-request overrides keep working and a rejected config
+write never alters the effective mode.
+
+**Health fields.** `healthy_nodes` counts probes where both `NodeStatus` and
+`Stats` succeed. `total_nodes` is the current Raft voter count. A node entry
+reports its state, leader flag, last-seen Unix time, local fragment count,
+storage bytes, and an error string when a probe fails. `degraded` is true when
+any node is unhealthy **or** any committed key is marked `degraded`.
+`degraded_stripes` counts keys whose metadata still carries the degraded flag.
+`repair_queue_depth` is reserved for task 09 and is zero here.
+
+**Probe cadence.** `ClusterHealth` is deliberately on demand: it issues the
+probes when the RPC arrives, uses `CLUSTER_PROBE_TIMEOUT` (default `1s`) per
+node, and never blocks writes. Task 09 replaces the probe cadence with a cached
+background detector, at which point this handler reads the cache instead.
+
+**Authorization seam.** `internal/server.Authorizer` is the hook for task 10. An
+allow-all implementation is installed only while `AUTH_TOKEN` is empty. If
+`AUTH_TOKEN` is set and no authorizer is configured, process startup fails
+instead of silently admitting unauthenticated requests. Internal clients dial
+through `internal/rpc.DialOptions`, which attaches
+`authorization: Bearer <token>` to unary and streaming calls and raises the gRPC
+message limit to `MAX_MESSAGE_SIZE`; `rpc.AppendAuth` provides the same header
+for one-off calls.
 
 ## Fragment transport v2
 

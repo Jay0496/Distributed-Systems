@@ -30,6 +30,8 @@ func clearConfigEnv(t *testing.T) {
 		"READ_TIMEOUT",
 		"READ_PARALLELISM",
 		"READ_REPAIR_WORKERS",
+		"CLUSTER_PROBE_TIMEOUT",
+		"AUTH_TOKEN",
 		"BOOTSTRAP",
 		"JOIN_ADDR",
 		"TLS_ENABLED",
@@ -96,6 +98,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ReadRepairWorkers != config.DefaultReadRepairWorkers {
 		t.Errorf("ReadRepairWorkers = %d, want %d", cfg.ReadRepairWorkers, config.DefaultReadRepairWorkers)
 	}
+	if cfg.ClusterProbeTimeout != config.DefaultClusterProbeTimeout {
+		t.Errorf("ClusterProbeTimeout = %v, want %v", cfg.ClusterProbeTimeout, config.DefaultClusterProbeTimeout)
+	}
+	if cfg.AuthToken != "" {
+		t.Errorf("AuthToken = %q, want empty", cfg.AuthToken)
+	}
 	if cfg.Bootstrap {
 		t.Error("Bootstrap = true, want false")
 	}
@@ -129,6 +137,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("READ_TIMEOUT", "7s")
 	t.Setenv("READ_PARALLELISM", "3")
 	t.Setenv("READ_REPAIR_WORKERS", "4")
+	t.Setenv("CLUSTER_PROBE_TIMEOUT", "750ms")
+	t.Setenv("AUTH_TOKEN", "  secret-token  ")
 	t.Setenv("BOOTSTRAP", "true")
 	t.Setenv("JOIN_ADDR", "node1:50051")
 	t.Setenv("TLS_ENABLED", "true")
@@ -185,6 +195,12 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 	if cfg.ReadRepairWorkers != 4 {
 		t.Errorf("ReadRepairWorkers = %d, want 4", cfg.ReadRepairWorkers)
+	}
+	if cfg.ClusterProbeTimeout != 750*time.Millisecond {
+		t.Errorf("ClusterProbeTimeout = %v, want 750ms", cfg.ClusterProbeTimeout)
+	}
+	if cfg.AuthToken != "secret-token" {
+		t.Errorf("AuthToken = %q, want secret-token", cfg.AuthToken)
 	}
 	if !cfg.Bootstrap {
 		t.Error("Bootstrap = false, want true")
@@ -284,6 +300,7 @@ func TestLoadRejectsInvalidFragmentLimits(t *testing.T) {
 	t.Setenv("READ_TIMEOUT", "-1s")
 	t.Setenv("READ_PARALLELISM", "0")
 	t.Setenv("READ_REPAIR_WORKERS", "not-a-number")
+	t.Setenv("CLUSTER_PROBE_TIMEOUT", "-1s")
 
 	cfg := config.Load()
 
@@ -317,6 +334,9 @@ func TestLoadRejectsInvalidFragmentLimits(t *testing.T) {
 	if cfg.ReadRepairWorkers != config.DefaultReadRepairWorkers {
 		t.Errorf("ReadRepairWorkers = %d, want fallback %d", cfg.ReadRepairWorkers, config.DefaultReadRepairWorkers)
 	}
+	if cfg.ClusterProbeTimeout != config.DefaultClusterProbeTimeout {
+		t.Errorf("ClusterProbeTimeout = %v, want fallback %v", cfg.ClusterProbeTimeout, config.DefaultClusterProbeTimeout)
+	}
 }
 
 func TestWithDefaultsFillsZeroValues(t *testing.T) {
@@ -331,28 +351,31 @@ func TestWithDefaultsFillsZeroValues(t *testing.T) {
 		cfg.ShardUploadTimeout != config.DefaultShardUploadTimeout ||
 		cfg.ReadTimeout != config.DefaultReadTimeout ||
 		cfg.ReadParallelism != config.DefaultReadParallelism ||
-		cfg.ReadRepairWorkers != config.DefaultReadRepairWorkers {
+		cfg.ReadRepairWorkers != config.DefaultReadRepairWorkers ||
+		cfg.ClusterProbeTimeout != config.DefaultClusterProbeTimeout {
 		t.Fatalf("WithDefaults = %+v", cfg)
 	}
 
 	explicit := config.Config{
-		MaxFragmentSize:    10,
-		MaxMessageSize:     9,
-		UploadChunkSize:    8,
-		FragmentTimeout:    time.Second,
-		MaxValueSize:       7,
-		WriteTimeout:       6 * time.Second,
-		ShardUploadTimeout: 5 * time.Second,
-		ReadTimeout:        4 * time.Second,
-		ReadParallelism:    3,
-		ReadRepairWorkers:  2,
+		MaxFragmentSize:     10,
+		MaxMessageSize:      9,
+		UploadChunkSize:     8,
+		FragmentTimeout:     time.Second,
+		MaxValueSize:        7,
+		WriteTimeout:        6 * time.Second,
+		ShardUploadTimeout:  5 * time.Second,
+		ReadTimeout:         4 * time.Second,
+		ReadParallelism:     3,
+		ReadRepairWorkers:   2,
+		ClusterProbeTimeout: 500 * time.Millisecond,
 	}.WithDefaults()
 	if explicit.MaxFragmentSize != 10 || explicit.MaxMessageSize != 9 ||
 		explicit.UploadChunkSize != 8 || explicit.FragmentTimeout != time.Second ||
 		explicit.MaxValueSize != 7 || explicit.WriteTimeout != 6*time.Second ||
 		explicit.ShardUploadTimeout != 5*time.Second ||
 		explicit.ReadTimeout != 4*time.Second ||
-		explicit.ReadParallelism != 3 || explicit.ReadRepairWorkers != 2 {
+		explicit.ReadParallelism != 3 || explicit.ReadRepairWorkers != 2 ||
+		explicit.ClusterProbeTimeout != 500*time.Millisecond {
 		t.Fatalf("WithDefaults overwrote explicit values: %+v", explicit)
 	}
 }

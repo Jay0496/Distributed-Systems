@@ -31,6 +31,11 @@ const (
 	StorageService_ListFragments_FullMethodName         = "/storage.StorageService/ListFragments"
 	StorageService_StatFragment_FullMethodName          = "/storage.StorageService/StatFragment"
 	StorageService_Repair_FullMethodName                = "/storage.StorageService/Repair"
+	StorageService_Delete_FullMethodName                = "/storage.StorageService/Delete"
+	StorageService_GetConfig_FullMethodName             = "/storage.StorageService/GetConfig"
+	StorageService_SetConfig_FullMethodName             = "/storage.StorageService/SetConfig"
+	StorageService_ClusterHealth_FullMethodName         = "/storage.StorageService/ClusterHealth"
+	StorageService_Stats_FullMethodName                 = "/storage.StorageService/Stats"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -66,6 +71,20 @@ type StorageServiceClient interface {
 	// Repair is the entry point for the failure-management subsystem to ask a
 	// node to rebuild a missing fragment.
 	Repair(ctx context.Context, in *RepairRequest, opts ...grpc.CallOption) (*RepairResponse, error)
+	// Delete removes a key's committed metadata and then garbage-collects the
+	// stripe's fragments on their owners. It is idempotent.
+	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	// GetConfig returns the cluster-wide default redundancy mode. The leader
+	// serves a linearizable read through Raft; followers forward.
+	GetConfig(ctx context.Context, in *GetConfigRequest, opts ...grpc.CallOption) (*ConfigResponse, error)
+	// SetConfig replaces the cluster-wide default redundancy mode through Raft.
+	// Only the leader commits; followers forward.
+	SetConfig(ctx context.Context, in *SetConfigRequest, opts ...grpc.CallOption) (*ConfigResponse, error)
+	// ClusterHealth reports the leader, global mode, node health, and degraded
+	// state. Followers forward because only the leader has a complete view.
+	ClusterHealth(ctx context.Context, in *ClusterHealthRequest, opts ...grpc.CallOption) (*ClusterHealthResponse, error)
+	// Stats reports local storage and repair counters. Any node may answer.
+	Stats(ctx context.Context, in *StatsRequest, opts ...grpc.CallOption) (*StatsResponse, error)
 }
 
 type storageServiceClient struct {
@@ -255,6 +274,51 @@ func (c *storageServiceClient) Repair(ctx context.Context, in *RepairRequest, op
 	return out, nil
 }
 
+func (c *storageServiceClient) Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error) {
+	out := new(DeleteResponse)
+	err := c.cc.Invoke(ctx, StorageService_Delete_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) GetConfig(ctx context.Context, in *GetConfigRequest, opts ...grpc.CallOption) (*ConfigResponse, error) {
+	out := new(ConfigResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetConfig_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) SetConfig(ctx context.Context, in *SetConfigRequest, opts ...grpc.CallOption) (*ConfigResponse, error) {
+	out := new(ConfigResponse)
+	err := c.cc.Invoke(ctx, StorageService_SetConfig_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) ClusterHealth(ctx context.Context, in *ClusterHealthRequest, opts ...grpc.CallOption) (*ClusterHealthResponse, error) {
+	out := new(ClusterHealthResponse)
+	err := c.cc.Invoke(ctx, StorageService_ClusterHealth_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Stats(ctx context.Context, in *StatsRequest, opts ...grpc.CallOption) (*StatsResponse, error) {
+	out := new(StatsResponse)
+	err := c.cc.Invoke(ctx, StorageService_Stats_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility
@@ -288,6 +352,20 @@ type StorageServiceServer interface {
 	// Repair is the entry point for the failure-management subsystem to ask a
 	// node to rebuild a missing fragment.
 	Repair(context.Context, *RepairRequest) (*RepairResponse, error)
+	// Delete removes a key's committed metadata and then garbage-collects the
+	// stripe's fragments on their owners. It is idempotent.
+	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
+	// GetConfig returns the cluster-wide default redundancy mode. The leader
+	// serves a linearizable read through Raft; followers forward.
+	GetConfig(context.Context, *GetConfigRequest) (*ConfigResponse, error)
+	// SetConfig replaces the cluster-wide default redundancy mode through Raft.
+	// Only the leader commits; followers forward.
+	SetConfig(context.Context, *SetConfigRequest) (*ConfigResponse, error)
+	// ClusterHealth reports the leader, global mode, node health, and degraded
+	// state. Followers forward because only the leader has a complete view.
+	ClusterHealth(context.Context, *ClusterHealthRequest) (*ClusterHealthResponse, error)
+	// Stats reports local storage and repair counters. Any node may answer.
+	Stats(context.Context, *StatsRequest) (*StatsResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -330,6 +408,21 @@ func (UnimplementedStorageServiceServer) StatFragment(context.Context, *DeleteFr
 }
 func (UnimplementedStorageServiceServer) Repair(context.Context, *RepairRequest) (*RepairResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Repair not implemented")
+}
+func (UnimplementedStorageServiceServer) Delete(context.Context, *DeleteRequest) (*DeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Delete not implemented")
+}
+func (UnimplementedStorageServiceServer) GetConfig(context.Context, *GetConfigRequest) (*ConfigResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetConfig not implemented")
+}
+func (UnimplementedStorageServiceServer) SetConfig(context.Context, *SetConfigRequest) (*ConfigResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetConfig not implemented")
+}
+func (UnimplementedStorageServiceServer) ClusterHealth(context.Context, *ClusterHealthRequest) (*ClusterHealthResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClusterHealth not implemented")
+}
+func (UnimplementedStorageServiceServer) Stats(context.Context, *StatsRequest) (*StatsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Stats not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 
@@ -574,6 +667,96 @@ func _StorageService_Repair_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Delete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Delete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Delete(ctx, req.(*DeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_GetConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetConfigRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetConfig(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetConfig_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetConfig(ctx, req.(*GetConfigRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_SetConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetConfigRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).SetConfig(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_SetConfig_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).SetConfig(ctx, req.(*SetConfigRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_ClusterHealth_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClusterHealthRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ClusterHealth(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ClusterHealth_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ClusterHealth(ctx, req.(*ClusterHealthRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Stats_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Stats(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Stats_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Stats(ctx, req.(*StatsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -616,6 +799,26 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Repair",
 			Handler:    _StorageService_Repair_Handler,
+		},
+		{
+			MethodName: "Delete",
+			Handler:    _StorageService_Delete_Handler,
+		},
+		{
+			MethodName: "GetConfig",
+			Handler:    _StorageService_GetConfig_Handler,
+		},
+		{
+			MethodName: "SetConfig",
+			Handler:    _StorageService_SetConfig_Handler,
+		},
+		{
+			MethodName: "ClusterHealth",
+			Handler:    _StorageService_ClusterHealth_Handler,
+		},
+		{
+			MethodName: "Stats",
+			Handler:    _StorageService_Stats_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

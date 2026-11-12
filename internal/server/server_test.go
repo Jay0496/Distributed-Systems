@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,6 +49,38 @@ type testCluster struct {
 	nodes []*testNode
 	byID  map[string]*testNode
 	dial  dialFunc
+
+	mu          sync.RWMutex
+	unreachable map[string]bool
+}
+
+// SetUnreachable makes the named nodes fail every outbound gRPC dial. Raft is
+// unaffected because it uses its own in-memory transport.
+func (c *testCluster) SetUnreachable(ids ...string) {
+	c.mu.Lock()
+	for _, id := range ids {
+		c.unreachable[id] = true
+	}
+	c.mu.Unlock()
+	for _, tn := range c.nodes {
+		if tn.srv != nil {
+			tn.srv.DropConnections()
+		}
+	}
+}
+
+// SetReachable re-enables dialing to the named nodes.
+func (c *testCluster) SetReachable(ids ...string) {
+	c.mu.Lock()
+	for _, id := range ids {
+		delete(c.unreachable, id)
+	}
+	c.mu.Unlock()
+	for _, tn := range c.nodes {
+		if tn.srv != nil {
+			tn.srv.DropConnections()
+		}
+	}
 }
 
 // newTestCluster starts n Raft nodes (node1 bootstraps the full configuration)
@@ -57,8 +90,9 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 	t.Helper()
 
 	c := &testCluster{
-		nodes: make([]*testNode, n),
-		byID:  make(map[string]*testNode),
+		nodes:       make([]*testNode, n),
+		byID:        make(map[string]*testNode),
+		unreachable: make(map[string]bool, n),
 	}
 
 	// 1. Create and fully mesh the Raft transports.
@@ -97,6 +131,12 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 	}
 
 	dial := func(ctx context.Context, target string) (*grpc.ClientConn, error) {
+		c.mu.RLock()
+		down := c.unreachable[target]
+		c.mu.RUnlock()
+		if down {
+			return nil, fmt.Errorf("support: node %s is unreachable", target)
+		}
 		tn, ok := c.byID[target]
 		if !ok {
 			return nil, fmt.Errorf("unknown peer %q", target)

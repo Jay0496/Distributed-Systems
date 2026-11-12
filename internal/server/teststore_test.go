@@ -263,3 +263,39 @@ func (s *testStore) GetConfig() (storage.ClusterConfig, error) {
 	}
 	return s.config, nil
 }
+
+// ListKeys returns committed metadata ordered by key.
+func (s *testStore) ListKeys() ([]storage.KeyMeta, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	keys := make([]storage.KeyMeta, 0, len(s.metas))
+	for _, meta := range s.metas {
+		meta.Placement = append([]storage.ShardPlacement(nil), meta.Placement...)
+		keys = append(keys, meta)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Key < keys[j].Key })
+	return keys, nil
+}
+
+// Stats reports counts for the in-memory store. File sizes are not modelled;
+// the returned byte count is the fragment payload total.
+func (s *testStore) Stats() (storage.StoreStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats := storage.StoreStats{KeyCount: int64(len(s.metas))}
+	stripes := make(map[string]struct{}, len(s.metas))
+	for _, meta := range s.metas {
+		stripes[meta.StripeID] = struct{}{}
+	}
+	stats.StripeCount = int64(len(stripes))
+	for _, shards := range s.fragments {
+		for _, frag := range shards {
+			stats.FragmentCount++
+			stats.FragmentBytes += int64(len(frag.Data))
+		}
+	}
+	stats.Bytes = stats.FragmentBytes
+	return stats, nil
+}

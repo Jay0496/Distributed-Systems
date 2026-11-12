@@ -23,11 +23,14 @@ On macOS/Linux, replace `${PWD}` with `$(pwd)`.
 | `internal/server/server_test.go` | component | gRPC handlers over `bufconn`: leader writes, follower forwarding, metadata commits, `NodeStatus` agreement, health, mode validation, loop guard, `Join` | no (in-process Raft + bufconn) |
 | `internal/server/write_test.go` | component | write validation, mode resolution, version allocation, upload quorum, commit outcomes, overwrite GC | no (bufconn + fake apply) |
 | `internal/server/read_test.go` | component | RS and replication reads, missing/corrupt shards, local fast path, read-repair queue and saturation, explicit NotFound/FailedPrecondition/DataLoss/DeadlineExceeded/Internal mapping, `ReadVerified` without repair | no (fake apply + local store) |
+| `internal/server/admin_test.go` | component | config get/set with follower forwarding and mode precedence, delete ordering/GC/idempotency, local stats, cluster health and degraded reporting, auth startup guard | no (in-process Raft + bufconn) |
+| `internal/rpc/credentials_test.go` | unit | `AUTH_TOKEN` parsing, bearer metadata append, unary token propagation, empty-token behaviour, message-limit validation | no (bufconn) |
 | `internal/cluster/repair_queue_test.go` | unit | bounded worker queue, handler execution, `ErrRepairQueueFull`, idempotent close | no |
 | `internal/server/fragment_push_test.go` | component | concurrent shard uploads, local-owner fast path, unreachable owners, checksum rejection | no (bufconn) |
 | `internal/server/fragments_test.go` | component | fragment transport over `bufconn`: single/multi-chunk uploads, offsets, consistency, idempotent retry and `AlreadyExists`, replacement, limits, empty fragments, download streaming, delete/list/stat, oversized messages, concurrency, cancellation and timeouts | no (bufconn) |
 | `tests/integration/write_path_test.go` | integration (in-process) | five-node Raft + SQLite write path: RS shard placement, replication copies, degraded writes, quorum rejection, overwrite GC | no |
 | `tests/integration/read_path_test.go` | integration (in-process) | five-node read path: RS reads with two owners down, corrupt-shard read repair, replication fallback from one remote copy, three-shard failure, NotFound forwarding | no |
+| `tests/integration/admin_test.go` | integration (in-process) | config persistence across a node restart, delete metadata and fragment GC, local stats after writes, leader/degraded health with an unreachable node | no |
 | `tests/cluster_test.go` | integration | five-node Compose cluster: leader agreement and write through a follower; read-path coverage lives in the in-process suite | yes (`-tags=integration`) |
 
 The integration file carries `//go:build integration`, so the default
@@ -125,6 +128,19 @@ restore the intended checksum.
 
 ```powershell
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -count=1 -v ./tests/integration
+```
+
+### Admin API tests
+
+`internal/server/admin_test.go` exercises the config, delete, stats, and health
+handlers against the in-process five-node cluster. Leader forwarding, mode
+precedence, delete ordering, and degraded health reporting are all component
+tests; `tests/integration/admin_test.go` repeats the important paths against real
+SQLite stores and a restarted node.
+
+```powershell
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./internal/server -run 'TestServerConfig|TestServerDelete|TestServerStats|TestCheckAuth'
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -count=1 -v ./tests/integration -run 'TestConfig|TestDelete|TestStats|TestHealth'
 ```
 
 ### Fragment transport tests

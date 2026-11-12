@@ -41,6 +41,11 @@ const (
 	DefaultReadRepairWorkers = 2
 )
 
+// Admin defaults. CLUSTER_PROBE_TIMEOUT bounds one ClusterHealth probe of one
+// node. AUTH_TOKEN, when non-empty, is attached to outbound internal RPCs and
+// requires an authorizer; server-side enforcement lands in task 10.
+const DefaultClusterProbeTimeout = 1 * time.Second
+
 // Config holds the runtime configuration for a single storage node.
 type Config struct {
 	NodeID     string
@@ -85,6 +90,13 @@ type Config struct {
 	// (default 2).
 	ReadRepairWorkers int
 
+	// ClusterProbeTimeout bounds one node probe issued by ClusterHealth
+	// (default 1s).
+	ClusterProbeTimeout time.Duration
+	// AuthToken is the shared bearer token attached to outbound internal
+	// RPCs. Empty disables auth. Task 10 adds server-side enforcement.
+	AuthToken string
+
 	// BootstrapServers maps Raft server ID -> Raft address.
 	BootstrapServers map[string]string
 	// Peers maps Raft server ID -> gRPC address.
@@ -96,30 +108,32 @@ func Load() Config {
 	dataDir := envOr("DATA_DIR", "/data")
 
 	cfg := Config{
-		NodeID:             envOr("NODE_ID", "node1"),
-		GRPCPort:           envOr("PORT", "50051"),
-		RaftPort:           envOr("RAFT_PORT", "60051"),
-		DataDir:            dataDir,
-		StorePath:          envOr("STORE_PATH", filepath.Join(dataDir, "node.db")),
-		StoreBusyTimeout:   durationOr("STORE_BUSY_TIMEOUT", 5*time.Second),
-		MaxFragmentSize:    intOr("MAX_FRAGMENT_SIZE", DefaultMaxFragmentSize),
-		MaxMessageSize:     intOr("MAX_MESSAGE_SIZE", DefaultMaxMessageSize),
-		UploadChunkSize:    intOr("UPLOAD_CHUNK_SIZE", DefaultUploadChunkSize),
-		FragmentTimeout:    durationOr("FRAGMENT_TIMEOUT", DefaultFragmentTimeout),
-		MaxValueSize:       intOr("MAX_VALUE_SIZE", DefaultMaxValueSize),
-		WriteTimeout:       durationOr("WRITE_TIMEOUT", DefaultWriteTimeout),
-		ShardUploadTimeout: durationOr("SHARD_UPLOAD_TIMEOUT", DefaultShardUploadTimeout),
-		ReadTimeout:        durationOr("READ_TIMEOUT", DefaultReadTimeout),
-		ReadParallelism:    intOr("READ_PARALLELISM", DefaultReadParallelism),
-		ReadRepairWorkers:  intOr("READ_REPAIR_WORKERS", DefaultReadRepairWorkers),
-		Bootstrap:          os.Getenv("BOOTSTRAP") == "true",
-		JoinAddr:           os.Getenv("JOIN_ADDR"),
-		TLSEnabled:         os.Getenv("TLS_ENABLED") == "true",
-		TLSCert:            os.Getenv("TLS_CERT_FILE"),
-		TLSKey:             os.Getenv("TLS_KEY_FILE"),
-		TLSCA:              os.Getenv("TLS_CA_FILE"),
-		BootstrapServers:   parsePeerMap(os.Getenv("BOOTSTRAP_SERVERS")),
-		Peers:              parsePeerMap(os.Getenv("PEERS")),
+		NodeID:              envOr("NODE_ID", "node1"),
+		GRPCPort:            envOr("PORT", "50051"),
+		RaftPort:            envOr("RAFT_PORT", "60051"),
+		DataDir:             dataDir,
+		StorePath:           envOr("STORE_PATH", filepath.Join(dataDir, "node.db")),
+		StoreBusyTimeout:    durationOr("STORE_BUSY_TIMEOUT", 5*time.Second),
+		MaxFragmentSize:     intOr("MAX_FRAGMENT_SIZE", DefaultMaxFragmentSize),
+		MaxMessageSize:      intOr("MAX_MESSAGE_SIZE", DefaultMaxMessageSize),
+		UploadChunkSize:     intOr("UPLOAD_CHUNK_SIZE", DefaultUploadChunkSize),
+		FragmentTimeout:     durationOr("FRAGMENT_TIMEOUT", DefaultFragmentTimeout),
+		MaxValueSize:        intOr("MAX_VALUE_SIZE", DefaultMaxValueSize),
+		WriteTimeout:        durationOr("WRITE_TIMEOUT", DefaultWriteTimeout),
+		ShardUploadTimeout:  durationOr("SHARD_UPLOAD_TIMEOUT", DefaultShardUploadTimeout),
+		ReadTimeout:         durationOr("READ_TIMEOUT", DefaultReadTimeout),
+		ReadParallelism:     intOr("READ_PARALLELISM", DefaultReadParallelism),
+		ReadRepairWorkers:   intOr("READ_REPAIR_WORKERS", DefaultReadRepairWorkers),
+		ClusterProbeTimeout: durationOr("CLUSTER_PROBE_TIMEOUT", DefaultClusterProbeTimeout),
+		AuthToken:           strings.TrimSpace(os.Getenv("AUTH_TOKEN")),
+		Bootstrap:           os.Getenv("BOOTSTRAP") == "true",
+		JoinAddr:            os.Getenv("JOIN_ADDR"),
+		TLSEnabled:          os.Getenv("TLS_ENABLED") == "true",
+		TLSCert:             os.Getenv("TLS_CERT_FILE"),
+		TLSKey:              os.Getenv("TLS_KEY_FILE"),
+		TLSCA:               os.Getenv("TLS_CA_FILE"),
+		BootstrapServers:    parsePeerMap(os.Getenv("BOOTSTRAP_SERVERS")),
+		Peers:               parsePeerMap(os.Getenv("PEERS")),
 	}
 	return cfg
 }
@@ -157,6 +171,9 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.ReadRepairWorkers <= 0 {
 		c.ReadRepairWorkers = DefaultReadRepairWorkers
+	}
+	if c.ClusterProbeTimeout <= 0 {
+		c.ClusterProbeTimeout = DefaultClusterProbeTimeout
 	}
 	return c
 }

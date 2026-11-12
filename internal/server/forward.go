@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"distributed-kv-store/internal/config"
+	"distributed-kv-store/internal/rpc"
 
 	pb "distributed-kv-store/proto"
 
@@ -25,10 +26,16 @@ const (
 // dialFunc abstracts gRPC dialing so tests can inject in-memory transports.
 type dialFunc func(ctx context.Context, target string) (*grpc.ClientConn, error)
 
-// newDialFunc returns the production dialer. TLS is used when configured.
+// newDialFunc returns the production dialer. TLS is used when configured, and
+// the shared rpc helper attaches AUTH_TOKEN and raises the gRPC message limit
+// for every internal client.
 func newDialFunc(cfg config.Config) dialFunc {
+	shared, sharedErr := rpc.DialOptions(cfg.AuthToken, cfg.MaxMessageSize)
 	return func(ctx context.Context, target string) (*grpc.ClientConn, error) {
-		var opts []grpc.DialOption
+		if sharedErr != nil {
+			return nil, sharedErr
+		}
+		opts := append([]grpc.DialOption(nil), shared...)
 		if cfg.TLSEnabled {
 			creds, err := credentials.NewClientTLSFromFile(cfg.TLSCA, "")
 			if err != nil {
@@ -38,15 +45,7 @@ func newDialFunc(cfg config.Config) dialFunc {
 		} else {
 			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		}
-		// Keep both call-size limits aligned with the server. Without these the
-		// gRPC 4 MiB default would cap forwarded values and fragment chunks.
-		opts = append(opts,
-			grpc.WithDefaultCallOptions(
-				grpc.MaxCallRecvMsgSize(cfg.MaxMessageSize),
-				grpc.MaxCallSendMsgSize(cfg.MaxMessageSize),
-			),
-			grpc.WithBlock(),
-		)
+		opts = append(opts, grpc.WithBlock())
 		return grpc.DialContext(ctx, target, opts...)
 	}
 }
@@ -144,6 +143,46 @@ func (s *Server) forwardPut(ctx context.Context, req *pb.PutRequest) (*pb.PutRes
 	}
 
 	return &pb.PutResponse{Success: false, Message: fmt.Sprintf("forward to leader %s failed: %v", target, lastErr)}, nil
+}
+
+// forwardToLeader performs one admin RPC against the current leader. It keeps
+// the same forwarding guard and retry policy as Put/Get: a request that
+// already made one hop is rejected, and only an unavailable transport is
+// retried. The callback writes its response into a caller-owned variable.
+func (s *Server) forwardToLeader(ctx context.Context, call func(context.Context, pb.StorageServiceClient) error) error {
+	if alreadyForwarded(ctx) {
+		return status.Error(codes.FailedPrecondition, "request was forwarded but this node is not the leader")
+	}
+
+	target, ok := s.leaderGRPCAddr()
+	if !ok {
+		return status.Error(codes.Unavailable, "not the leader and no leader is known")
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		conn, err := s.getConn(ctx, target)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		fctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
+		fctx = metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true")
+		err = call(fctx, pb.NewStorageServiceClient(conn))
+		cancel()
+
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if status.Code(err) != codes.Unavailable {
+			return err
+		}
+		s.dropConn(target)
+	}
+
+	return status.Errorf(codes.Unavailable, "forward admin request to leader %s failed: %v", target, lastErr)
 }
 
 // forwardGet forwards a read to the leader. It retries once on Unavailable.

@@ -11,6 +11,7 @@
 | ADR-007 | Keep Raft metadata-only and move fragments out of band | Accepted |
 | ADR-008 | Write fragments before metadata and require a three-shard quorum | Accepted |
 | ADR-009 | Leader-coordinated verified reads with asynchronous read repair | Accepted |
+| ADR-010 | On-demand cluster health probing until a cached detector exists | Accepted |
 
 ---
 
@@ -659,3 +660,71 @@ the queue interface and never imports `internal/server`.
   inspection is required.
 - **Clear `degraded` from the read path.** Rejected: it would create a metadata
   version/status race and duplicate task 09's all-five-present check.
+
+---
+
+## ADR-010: On-demand cluster health probing until a cached detector exists
+
+**Date:** 2026-11-11
+**Status:** Accepted
+
+### Context
+
+The CLI and demo need a single `status` view: the current leader, global mode,
+per-node health, fragment and byte counts, and whether the cluster is degraded.
+The system has no background failure detector yet; task 09 adds one with repair
+scheduling and backoff. Building a second, permanent health mechanism now would
+duplicate that work and create two sources of truth.
+
+### Decision
+
+`ClusterHealth` is leader-forwarded and probes the current Raft configuration on
+demand:
+
+- The leader reads the Raft voter list, maps IDs to gRPC addresses through
+  `PEERS`, and probes every node in parallel.
+- Each probe calls `NodeStatus` and `Stats` with `CLUSTER_PROBE_TIMEOUT`
+  (default `1s`). A node is healthy only when both calls succeed.
+- `degraded` is the union of “any node unhealthy” and “any committed key marked
+  degraded”; `degraded_stripes` is the count of degraded keys.
+- Probes dial through the shared `internal/rpc` helper so they carry
+  `AUTH_TOKEN` and `MAX_MESSAGE_SIZE` when auth is enabled.
+
+Task 09 replaces the probe cadence with a cached background detector. The RPC
+shape stays the same and the handler will read the cache instead of probing.
+
+### Rationale
+
+- A demo needs an answer now; an on-demand probe is the smallest correct
+  implementation and has no additional lifecycle or failure modes.
+- The leader already owns write coordination, degraded reporting, and repair
+  scheduling, so it is the natural aggregation point.
+- Parallel probes with a short timeout keep an unreachable node from delaying
+  the response beyond one probe window.
+- Reusing `internal/rpc.DialOptions` means health checks do not become an
+  unauthenticated back door once task 10 enforces tokens.
+
+### Consequences
+
+**Positive**
+
+- No background goroutine, cache invalidation, or staleness window in this
+  task.
+- The response reflects the cluster at request time.
+- Task 09 can swap the implementation without changing the proto or the CLI.
+
+**Negative**
+
+- Each `status` call performs N RPC pairs; a large or slow cluster pays per
+  request.
+- A node that is slow but not dead can consume the full probe timeout.
+- Two concurrent status calls perform duplicate probes until the detector lands.
+
+### Alternatives considered
+
+- **Build the full background detector now.** Rejected: that is task 09's scope
+  and would couple this admin task to repair scheduling.
+- **Read only the local Raft view.** Rejected: a follower has no complete health
+  picture, and Raft state alone cannot report fragment counts or degraded keys.
+- **Exempt `NodeStatus` and `Stats` from auth.** Rejected: it creates an
+  unauthenticated observability surface and diverges from the task 10 model.
