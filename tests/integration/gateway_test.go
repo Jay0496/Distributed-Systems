@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -12,6 +13,8 @@ import (
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/gateway"
 	"distributed-kv-store/tests/support"
+
+	pb "distributed-kv-store/proto"
 )
 
 // gatewayTestConfig maps every in-process node ID to itself so the support
@@ -104,5 +107,101 @@ func TestGatewayCLICommands(t *testing.T) {
 
 	if got := run("repair", "gw-key-2", "--force"); !strings.Contains(got, "repair accepted") {
 		t.Fatalf("repair output = %q", got)
+	}
+}
+
+// keyForEntry finds a key whose consistent-hash entry node is want.
+func keyForEntry(t *testing.T, cfg config.GatewayConfig, want string) string {
+	t.Helper()
+	router := gateway.NewRouter(cfg.NodeAddrs(), cfg.VNodes)
+	for i := 0; i < 100000; i++ {
+		key := fmt.Sprintf("gateway-entry-%d", i)
+		if node, _ := router.GetNode(key); node == want {
+			return key
+		}
+	}
+	t.Fatalf("no key routed to %s", want)
+	return ""
+}
+
+// TestGatewayUsesFollowerEntryAndForwardsToLeader proves that the ring's entry
+// node is a follower and that the follower's forwarding path completes the
+// write on the leader.
+func TestGatewayUsesFollowerEntryAndForwardsToLeader(t *testing.T) {
+	c := support.StartCluster(t, 5)
+	leader, err := c.WaitLeader(15 * time.Second)
+	if err != nil {
+		t.Fatalf("leader: %v", err)
+	}
+	follower := c.NonLeaderIDs(t)[0]
+	cfg := gatewayTestConfig(c)
+	key := keyForEntry(t, cfg, follower)
+
+	client := gateway.NewClientWithDialer(cfg, c.Dialer())
+	served, resp, err := client.Put(context.Background(), &pb.PutRequest{
+		Key: key, Value: []byte("forwarded"), Mode: "rs32",
+	})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if !resp.GetSuccess() {
+		t.Fatalf("Put rejected: %s", resp.GetMessage())
+	}
+	if served != follower {
+		t.Fatalf("served by %q, want entry node %q", served, follower)
+	}
+	if served == leader.ID {
+		t.Fatalf("entry node was the leader %q; test did not exercise fan-out", served)
+	}
+	waitWriteMeta(t, c, key, 1)
+}
+
+// TestGatewayRetriesPastStoppedEntryNode stops the entry node for a key and
+// verifies that the retry loop succeeds through a ring successor.
+func TestGatewayRetriesPastStoppedEntryNode(t *testing.T) {
+	c := support.StartCluster(t, 5)
+	leader, err := c.WaitLeader(15 * time.Second)
+	if err != nil {
+		t.Fatalf("leader: %v", err)
+	}
+	cfg := gatewayTestConfig(c)
+	cfg.Retries = 4
+
+	var stopped string
+	for _, id := range c.NonLeaderIDs(t) {
+		if id != leader.ID {
+			stopped = id
+			break
+		}
+	}
+	key := keyForEntry(t, cfg, stopped)
+	c.StopNode(t, stopped)
+	t.Cleanup(func() {
+		// The cluster cleanup tolerates an already-stopped node; restarting it
+		// only makes the failure report clearer if the assertion below fails.
+		if c.Node(t, stopped).Raft == nil {
+			c.StartNode(t, stopped)
+		}
+	})
+
+	client := gateway.NewClientWithDialer(cfg, c.Dialer())
+	served, resp, err := client.Put(context.Background(), &pb.PutRequest{
+		Key: key, Value: []byte("retry-value"), Mode: "rs32",
+	})
+	if err != nil {
+		t.Fatalf("retry Put: %v", err)
+	}
+	if !resp.GetSuccess() {
+		t.Fatalf("retry Put rejected: %s", resp.GetMessage())
+	}
+	if served == stopped {
+		t.Fatalf("served by stopped node %q", stopped)
+	}
+	readNode, got, err := client.Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("Get after retry Put: %v", err)
+	}
+	if readNode == stopped || !bytes.Equal(got.GetValue(), []byte("retry-value")) {
+		t.Fatalf("Get served by %q with %d bytes", readNode, len(got.GetValue()))
 	}
 }
