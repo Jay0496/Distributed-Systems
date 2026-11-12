@@ -22,6 +22,9 @@ type Service interface {
 	Delete(ctx context.Context, req *pb.DeleteRequest) (string, *pb.DeleteResponse, error)
 	GetConfig(ctx context.Context) (string, *pb.ConfigResponse, error)
 	SetConfig(ctx context.Context, mode string) (string, *pb.ConfigResponse, error)
+	ClusterHealth(ctx context.Context) (string, *pb.ClusterHealthResponse, error)
+	Stats(ctx context.Context) (string, *pb.StatsResponse, error)
+	Repair(ctx context.Context, req *pb.RepairRequest) (string, *pb.RepairResponse, error)
 }
 
 // CLI parses commands, calls the gateway client, and renders the result.
@@ -57,6 +60,14 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		return c.runDelete(ctx, args[1:])
 	case "mode":
 		return c.runMode(ctx, args[1:])
+	case "status":
+		return c.runStatus(ctx, args[1:])
+	case "health":
+		return c.runHealth(ctx, args[1:])
+	case "stats":
+		return c.runStats(ctx, args[1:])
+	case "repair":
+		return c.runRepair(ctx, args[1:])
 	default:
 		fmt.Fprint(c.out, Usage())
 		return fmt.Errorf("unknown command %q", args[0])
@@ -322,6 +333,146 @@ func (c *CLI) runMode(ctx context.Context, args []string) error {
 	return renderMode(c.out, node, resp, true, asJSON)
 }
 
+func (c *CLI) runStatus(ctx context.Context, args []string) error {
+	var (
+		asJSON bool
+		help   bool
+	)
+	positional, err := parseInterspersed(args, map[string]flagDef{
+		"json": boolFlag(&asJSON),
+		"help": boolFlag(&help),
+	})
+	if err != nil {
+		return err
+	}
+	if help {
+		fmt.Fprint(c.out, commandUsage("status"))
+		return nil
+	}
+	if len(positional) != 0 {
+		return errors.New("status takes no arguments")
+	}
+
+	node, resp, err := c.svc.ClusterHealth(ctx)
+	if err != nil {
+		return fmt.Errorf("status failed: %w", err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("status rejected by %s: %s", node, resp.GetMessage())
+	}
+	return renderStatus(c.out, node, resp, asJSON)
+}
+
+func (c *CLI) runHealth(ctx context.Context, args []string) error {
+	var (
+		asJSON bool
+		help   bool
+	)
+	positional, err := parseInterspersed(args, map[string]flagDef{
+		"json": boolFlag(&asJSON),
+		"help": boolFlag(&help),
+	})
+	if err != nil {
+		return err
+	}
+	if help {
+		fmt.Fprint(c.out, commandUsage("health"))
+		return nil
+	}
+	if len(positional) != 0 {
+		return errors.New("health takes no arguments")
+	}
+
+	node, resp, err := c.svc.ClusterHealth(ctx)
+	if err != nil {
+		return fmt.Errorf("health failed: %w", err)
+	}
+	healthy := clusterHealthy(resp)
+	if err := renderHealth(c.out, node, resp, healthy, asJSON); err != nil {
+		return err
+	}
+	if !healthy {
+		return fmt.Errorf("cluster is not healthy: %s", resp.GetMessage())
+	}
+	return nil
+}
+
+func (c *CLI) runStats(ctx context.Context, args []string) error {
+	var (
+		asJSON bool
+		help   bool
+	)
+	positional, err := parseInterspersed(args, map[string]flagDef{
+		"json": boolFlag(&asJSON),
+		"help": boolFlag(&help),
+	})
+	if err != nil {
+		return err
+	}
+	if help {
+		fmt.Fprint(c.out, commandUsage("stats"))
+		return nil
+	}
+	if len(positional) != 0 {
+		return errors.New("stats takes no arguments")
+	}
+
+	node, resp, err := c.svc.Stats(ctx)
+	if err != nil {
+		return fmt.Errorf("stats failed: %w", err)
+	}
+	return renderStats(c.out, node, resp, asJSON)
+}
+
+func (c *CLI) runRepair(ctx context.Context, args []string) error {
+	var (
+		stripeID string
+		force    bool
+		asJSON   bool
+		help     bool
+	)
+	positional, err := parseInterspersed(args, map[string]flagDef{
+		"stripe": stringFlag(&stripeID),
+		"force":  boolFlag(&force),
+		"json":   boolFlag(&asJSON),
+		"help":   boolFlag(&help),
+	})
+	if err != nil {
+		return err
+	}
+	if help {
+		fmt.Fprint(c.out, commandUsage("repair"))
+		return nil
+	}
+	if len(positional) != 1 {
+		return errors.New("repair requires exactly one key")
+	}
+
+	key := positional[0]
+	node, resp, err := c.svc.Repair(ctx, &pb.RepairRequest{
+		Key:      key,
+		StripeId: stripeID,
+		Force:    force,
+	})
+	if err != nil {
+		return fmt.Errorf("repair failed: %w", err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("repair rejected by %s: %s", node, resp.GetMessage())
+	}
+	return renderRepair(c.out, node, key, stripeID, force, resp, asJSON)
+}
+
+// clusterHealthy is the script-facing health definition: every voter is
+// reachable, a leader is known, and no committed stripe is degraded.
+func clusterHealthy(resp *pb.ClusterHealthResponse) bool {
+	return resp.GetSuccess() &&
+		resp.GetLeaderId() != "" &&
+		resp.GetTotalNodes() > 0 &&
+		resp.GetHealthyNodes() == resp.GetTotalNodes() &&
+		!resp.GetDegraded()
+}
+
 // Usage returns the top-level command help text.
 func Usage() string {
 	return `Usage:
@@ -332,6 +483,10 @@ Commands:
   get     Fetch a value: get <key> [--json]
   delete  Delete a key: delete <key> [--version N] [--json]
   mode    Read or set the cluster default: mode [rs32|replication] [--json]
+  status  Show leader, mode, health, degraded state, and repair queue
+  health  Print one health line; exits non-zero when the cluster is unhealthy
+  stats   Show storage and repair counters from the leader
+  repair  Enqueue a repair: repair <key> [--stripe ID] [--force] [--json]
   help    Show this help
 
 Run "gateway <command> --help" for command details.
@@ -373,6 +528,30 @@ Deletion is idempotent. --version makes it compare-and-delete.
 
 With no argument, prints the cluster default. With an argument, commits a new
 cluster-wide default through Raft.
+`
+	case "status":
+		return `Usage: gateway status [--json]
+
+Shows the leader, global mode, healthy node count, degraded stripes, repair
+queue depth, and one row per Raft voter.
+`
+	case "health":
+		return `Usage: gateway health [--json]
+
+Prints one line and exits non-zero unless every voter is healthy, a leader is
+known, and no committed stripe is degraded.
+`
+	case "stats":
+		return `Usage: gateway stats [--json]
+
+Shows keys, stripes, fragments, storage bytes, repair counters, and uptime from
+the leader (or the first reachable node when no leader is known).
+`
+	case "repair":
+		return `Usage: gateway repair <key> [--stripe ID] [--force] [--json]
+
+Asks the leader to enqueue repair for a key and returns immediately. --stripe
+requires the key's current stripe; --force re-encodes even present shards.
 `
 	default:
 		return Usage()

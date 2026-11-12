@@ -39,6 +39,20 @@ type fakeService struct {
 	setConfigCalls int
 	setConfigResp  *pb.ConfigResponse
 	setConfigErr   error
+
+	healthNode  string
+	healthResp  *pb.ClusterHealthResponse
+	healthErr   error
+	healthCalls int
+
+	statsNode string
+	statsResp *pb.StatsResponse
+	statsErr  error
+
+	repairReq  *pb.RepairRequest
+	repairNode string
+	repairResp *pb.RepairResponse
+	repairErr  error
 }
 
 func (f *fakeService) Put(_ context.Context, req *pb.PutRequest) (string, *pb.PutResponse, error) {
@@ -106,6 +120,65 @@ func (f *fakeService) SetConfig(_ context.Context, mode string) (string, *pb.Con
 		resp = &pb.ConfigResponse{Success: true, DefaultMode: mode, LeaderId: "node1"}
 	}
 	return f.configNode, resp, nil
+}
+
+func (f *fakeService) ClusterHealth(context.Context) (string, *pb.ClusterHealthResponse, error) {
+	f.healthCalls++
+	if f.healthErr != nil {
+		return f.healthNode, nil, f.healthErr
+	}
+	resp := f.healthResp
+	if resp == nil {
+		resp = healthyClusterResponse()
+	}
+	return f.healthNode, resp, nil
+}
+
+func (f *fakeService) Stats(context.Context) (string, *pb.StatsResponse, error) {
+	if f.statsErr != nil {
+		return f.statsNode, nil, f.statsErr
+	}
+	resp := f.statsResp
+	if resp == nil {
+		resp = &pb.StatsResponse{
+			NodeId: "node1", Mode: "rs32", Leader: true,
+			Keys: 4, Stripes: 4, Fragments: 20, StorageBytes: 2 * 1024 * 1024,
+			RepairQueueDepth: 2, RepairsCompleted: 3, RepairsFailed: 1, UptimeSeconds: 90,
+		}
+	}
+	return f.statsNode, resp, nil
+}
+
+func (f *fakeService) Repair(_ context.Context, req *pb.RepairRequest) (string, *pb.RepairResponse, error) {
+	f.repairReq = req
+	if f.repairErr != nil {
+		return f.repairNode, nil, f.repairErr
+	}
+	resp := f.repairResp
+	if resp == nil {
+		resp = &pb.RepairResponse{Success: true, Message: "repair accepted for 5 shards"}
+	}
+	return f.repairNode, resp, nil
+}
+
+func healthyClusterResponse() *pb.ClusterHealthResponse {
+	resp := &pb.ClusterHealthResponse{
+		Success: true, LeaderId: "node1", Mode: "rs32",
+		HealthyNodes: 5, TotalNodes: 5,
+		Message: "5/5 nodes healthy, 0 degraded stripes",
+	}
+	for i := 1; i <= 5; i++ {
+		resp.Nodes = append(resp.Nodes, &pb.NodeHealth{
+			NodeId:       "node" + string(rune('0'+i)),
+			GrpcAddr:     "node" + string(rune('0'+i)) + ":5005" + string(rune('0'+i)),
+			Healthy:      true,
+			Leader:       i == 1,
+			RaftState:    "Follower",
+			Fragments:    uint64(i),
+			StorageBytes: uint64(i) * 1024,
+		})
+	}
+	return resp
 }
 
 func newTestCLI(t *testing.T, svc Service) (*CLI, *bytes.Buffer, *bytes.Buffer) {
@@ -353,5 +426,106 @@ func TestCLIRequiresCommand(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Usage:") {
 		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestCLIStatusRendersFiveNodes(t *testing.T) {
+	svc := &fakeService{healthNode: "node2"}
+	cli, out, _ := newTestCLI(t, svc)
+	if err := cli.Run(context.Background(), []string{"status"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{"leader: node1", "mode: rs32", "5/5 nodes healthy", "NODE", "node5", "served by: node2"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestCLIStatusJSON(t *testing.T) {
+	cli, out, _ := newTestCLI(t, &fakeService{healthNode: "node2"})
+	if err := cli.Run(context.Background(), []string{"status", "--json"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var got struct {
+		Node  string `json:"node"`
+		Nodes []struct {
+			NodeID  string `json:"node_id"`
+			Healthy bool   `json:"healthy"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out.String())
+	}
+	if got.Node != "node2" || len(got.Nodes) != 5 {
+		t.Fatalf("JSON = %+v", got)
+	}
+}
+
+func TestCLIHealthUnhealthyExitsNonZero(t *testing.T) {
+	resp := healthyClusterResponse()
+	resp.Degraded = true
+	resp.HealthyNodes = 4
+	svc := &fakeService{healthNode: "node2", healthResp: resp}
+	cli, out, _ := newTestCLI(t, svc)
+
+	err := cli.Run(context.Background(), []string{"health"})
+	if err == nil || !strings.Contains(err.Error(), "not healthy") {
+		t.Fatalf("error = %v, want an unhealthy error", err)
+	}
+	if !strings.Contains(out.String(), "healthy=false") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestCLIHealthHealthy(t *testing.T) {
+	cli, out, _ := newTestCLI(t, &fakeService{healthNode: "node2"})
+	if err := cli.Run(context.Background(), []string{"health"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), "healthy=true") || strings.Count(strings.TrimSpace(out.String()), "\n") != 0 {
+		t.Fatalf("health output is not a single healthy line: %q", out.String())
+	}
+}
+
+func TestCLIStatsRendersFields(t *testing.T) {
+	svc := &fakeService{statsNode: "node1"}
+	cli, out, _ := newTestCLI(t, svc)
+	if err := cli.Run(context.Background(), []string{"stats", "--json"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out.String())
+	}
+	if got["keys"] != float64(4) || got["fragments"] != float64(20) || got["leader"] != true {
+		t.Fatalf("JSON = %v", got)
+	}
+}
+
+func TestCLIRepairForwardsFlags(t *testing.T) {
+	svc := &fakeService{repairNode: "node2"}
+	cli, out, _ := newTestCLI(t, svc)
+	if err := cli.Run(context.Background(), []string{"repair", "k", "--stripe", "stripe-1", "--force"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if svc.repairReq.GetKey() != "k" || svc.repairReq.GetStripeId() != "stripe-1" || !svc.repairReq.GetForce() {
+		t.Fatalf("repair request = %+v", svc.repairReq)
+	}
+	if !strings.Contains(out.String(), "repair accepted on node2") {
+		t.Fatalf("stdout = %q", out.String())
+	}
+}
+
+func TestCLIRepairRejectedResponseIsError(t *testing.T) {
+	svc := &fakeService{
+		repairNode: "node2",
+		repairResp: &pb.RepairResponse{Success: false, Message: "key not found"},
+	}
+	cli, _, _ := newTestCLI(t, svc)
+	err := cli.Run(context.Background(), []string{"repair", "k"})
+	if err == nil || !strings.Contains(err.Error(), "key not found") {
+		t.Fatalf("error = %v", err)
 	}
 }
