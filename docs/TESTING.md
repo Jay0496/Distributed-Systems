@@ -9,6 +9,34 @@ docker run --rm -v ${PWD}:/app -w /app golang:1.22 <command>
 
 On macOS/Linux, replace `${PWD}` with `$(pwd)`.
 
+## Script runner
+
+The deployment scripts wrap the common cases and handle cluster startup,
+health-waiting, the pinned network name, and `AUTH_TOKEN` for you:
+
+```powershell
+./scripts/test.ps1                 # unit and component tests
+./scripts/test.ps1 -Integration    # starts the cluster and runs tagged tests
+./scripts/test.ps1 -Chaos          # chaos-tagged suite
+./scripts/test.ps1 -Bench          # benchmark-tagged suite (placeholder)
+./scripts/test.ps1 -Integration -Keep
+```
+
+```bash
+./scripts/test.sh                  # unit and component tests
+./scripts/test.sh --integration
+./scripts/test.sh --chaos
+./scripts/test.sh --bench
+./scripts/test.sh --integration --keep
+```
+
+`test` starts the cluster only when fewer than five nodes are healthy and tears
+down only a cluster it started. `-Keep` / `--keep` leaves that cluster running.
+Integration containers run on `distributed-systems_cluster-net`; `AUTH_TOKEN` is
+passed with `-e AUTH_TOKEN` (the value is copied from the environment, never
+printed). `tests/cluster_test.go` reads `GATEWAY_NODES` when set and otherwise
+uses the five Compose defaults.
+
 ## Test matrix
 
 | File | Level | What it covers | Needs Compose? |
@@ -180,10 +208,17 @@ They exercise the real Compose deployment over the Docker network, so the node
 names (`node1`, …) must resolve.
 
 ```powershell
+./scripts/test.ps1 -Integration
+```
+
+Raw equivalent:
+
+```powershell
 docker compose up -d --build
 docker compose ps                      # wait for all five to be healthy
 
-docker run --rm --network distributed-systems_cluster-net -v ${PWD}:/app -w /app golang:1.22 `
+docker run --rm --network distributed-systems_cluster-net -e AUTH_TOKEN `
+  -v ${PWD}:/app -w /app golang:1.22 `
   go test -tags=integration -v -count=1 ./tests/...
 ```
 
@@ -192,8 +227,11 @@ Prerequisites:
 - All five containers healthy (`/app/healthcheck` calls `grpc.health.v1`).
 - Exactly one leader; the tests fail fast if the cluster cannot agree.
 - Run from the repository root so the volume mount path is correct.
-- The network name is `<compose-project>_cluster-net`. The default project name
-  is `distributed-systems`; if you rename the project, adjust the network.
+- The network name is pinned to `distributed-systems_cluster-net` by the
+  Compose `name:` field and explicit network `name:`; do not discover it
+  dynamically.
+- When `AUTH_TOKEN` is set, the test container must receive the same value. The
+  script passes it automatically; the raw command above uses `-e AUTH_TOKEN`.
 
 What the tests assert:
 
@@ -233,28 +271,42 @@ The checks below cover behaviour the automated tests cannot easily express
 
 ```powershell
 # one leader, five healthy nodes
-docker compose ps
-docker compose logs node1 node2 | Select-String "entering leader state"
+./scripts/up.ps1
+./scripts/up.ps1 -Help
+
+# full demo: RS/replication storage comparison, two-node failure, repair, delete
+./scripts/demo.ps1
+./scripts/demo.ps1 -Mode replication -SkipFailure
 
 # quorum with two nodes down
 docker compose stop node4 node5
-# send a Put to a surviving node (e.g. with the gateway or a small gRPC client)
-# and confirm it succeeds, then read it back from node1-node3
+docker compose run --rm gateway status
+docker compose run --rm gateway get demo-key
 docker compose start node4 node5
 
 # leader restart, then full restart with data retention
 docker compose restart node1
-docker compose down          # no -v
-docker compose up -d
+./scripts/down.ps1            # keeps volumes
+./scripts/up.ps1
 
 # confirm SQLite is created and survives a restart
 docker compose exec node1 ls -l /data
 docker compose restart node1
 docker compose exec node1 ls -l /data
+
+# destructive reset (explicit)
+./scripts/reset.ps1
 ```
 
 After the final `up`, use `NodeStatus` (or the integration tests) to confirm the
 cluster elects a leader and still serves previously written keys.
+
+The bench runner is a placeholder until the benchmark task:
+
+```powershell
+./scripts/bench.ps1
+./scripts/bench.ps1 --help
+```
 
 ## Regenerating the protobuf code
 

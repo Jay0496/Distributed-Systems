@@ -1,8 +1,112 @@
 # Operations Guide
 
-This guide covers failure detection, degraded mode, repair, rebalancing, and
-orphan cleanup for the fixed five-node cluster. For the design rationale see
-[ARCHITECTURE.md](ARCHITECTURE.md) and [DECISIONS.md](DECISIONS.md).
+This guide covers deployment, failure detection, degraded mode, repair,
+rebalancing, and orphan cleanup for the fixed five-node cluster. For the design
+rationale see [ARCHITECTURE.md](ARCHITECTURE.md) and
+[DECISIONS.md](DECISIONS.md).
+
+## Deployment
+
+### Prerequisites
+
+- Docker Engine or Docker Desktop with the Compose v2 plugin.
+- No host Go installation. Every build and test runs in a container.
+- The bash scripts use `jq` when available and fall back to `docker inspect`.
+
+### One-command startup
+
+```powershell
+./scripts/up.ps1
+```
+
+```bash
+./scripts/up.sh
+```
+
+`up` builds the image, runs `docker compose up --build -d`, waits for all five
+health checks, waits for a leader and `degraded=false`, then prints
+`docker compose ps` and `gateway status`. The default timeout is 120 seconds;
+pass `-Timeout` / `--timeout` to change it. A timeout prints current container
+status and the last 40 log lines before exiting non-zero.
+
+Compose no longer makes node2-node5 wait for node1's health. node1 bootstraps
+the five-voter configuration and Raft retries until peers appear, so startup
+order does not matter. Temporary `connection refused` messages during the first
+few seconds are expected and documented in the logs.
+
+### Scripts
+
+| Script | Purpose | Flags |
+| --- | --- | --- |
+| `up.ps1` / `up.sh` | Build, start, wait for health, print status | `-Timeout` / `--timeout` |
+| `down.ps1` / `down.sh` | Stop containers; preserve volumes by default | `-Volumes` / `--volumes` |
+| `reset.ps1` / `reset.sh` | Destructive reset of containers, network, and volumes | `-Build` / `--build` |
+| `demo.ps1` / `demo.sh` | End-to-end RS/replication, failure, repair, delete | `-Mode`, `-SkipFailure`, `-Keep`, `-ValueSize` |
+| `test.ps1` / `test.sh` | Unit, integration, chaos, bench suites | `-Integration`, `-Chaos`, `-Bench`, `-Keep` |
+| `bench.ps1` / `bench.sh` | Forward arguments to the bench tool | any bench flags |
+
+Every script supports `-Help` / `--help`. `down` is non-destructive; only
+`reset` or `down -Volumes` / `down --volumes` deletes the five data volumes.
+
+### Ports and volumes
+
+| Node | gRPC | Raft | Volume |
+| --- | --- | --- | --- |
+| node1 | 50051 | 60051 | `distributed-systems_node1-data` |
+| node2 | 50052 | 60052 | `distributed-systems_node2-data` |
+| node3 | 50053 | 60053 | `distributed-systems_node3-data` |
+| node4 | 50054 | 60054 | `distributed-systems_node4-data` |
+| node5 | 50055 | 60055 | `distributed-systems_node5-data` |
+
+The Compose project name is pinned to `distributed-systems`, so the network is
+always `distributed-systems_cluster-net`. The integration tests rely on that
+name. If an older checkout used a different project name, list `docker volume
+ls` and rename the volumes or reset with `./scripts/reset.ps1`.
+
+### CLI and auth
+
+The gateway and bench tools are in the `tools` profile and are not started by
+`up`:
+
+```powershell
+docker compose run --rm gateway status
+docker compose run --rm gateway mode rs32
+docker compose run --rm bench --help
+```
+
+When `AUTH_TOKEN` is set on the host, Compose passes it to all five nodes, the
+gateway, the bench tool, and test containers. Scripts pass `-e AUTH_TOKEN` by
+name and print only `auth: enabled` or `auth: disabled`; the token is never
+echoed. `up` and `demo` wait on cluster status rather than auth-protected
+fragments, so the same scripts work with auth on or off.
+
+### Logs and inspection
+
+```powershell
+docker compose ps
+docker compose logs -f --tail 100 node1
+docker compose exec node1 sqlite3 /data/node.db "select count(*) from fragments;"
+```
+
+The runtime image includes the `sqlite` CLI specifically so operators can inspect
+`/data/node.db` without installing tools on the host.
+
+### Reset and volume migration
+
+`docker compose down` and `./scripts/down.ps1` keep data. To start completely
+fresh, use `./scripts/reset.ps1` (or `./scripts/reset.ps1 -Build` to rebuild the
+image). The reset prints exactly what it will delete first.
+
+### Troubleshooting
+
+| Symptom | Likely cause / fix |
+| --- | --- |
+| `up` times out with fewer than five healthy nodes | Run `docker compose ps` and `docker compose logs --tail 100 node1`; check port conflicts on 50051-50055 or 60051-60055 |
+| Script reports `docker compose (v2) is unavailable` | Install the Compose plugin; `docker compose version` must succeed |
+| `node.db` or `raft.db` lock timeout | An old container still holds the volume; stop it and retry |
+| Integration tests cannot resolve `node1` | Run through `./scripts/test.ps1 -Integration` or use `--network distributed-systems_cluster-net` |
+| Data appears missing after changing the directory name | The project name is now pinned; check `docker volume ls` and migrate or reset |
+| `AUTH_TOKEN` mismatch | Set the same value for the host, every node, the gateway, and test containers; restart the cluster after changing it |
 
 ## What healthy looks like
 
@@ -74,13 +178,20 @@ Expected behaviour:
 Actions:
 
 ```powershell
-./gateway status
+docker compose run --rm gateway status
 docker compose stop node4 node5
 # exercise reads/writes while stopped
 docker compose start node4 node5
 # wait for repair; status should return to 5/5 and degraded=false
-./gateway status
+docker compose run --rm gateway status
 ```
+
+The `demo.ps1` / `demo.sh` runner automates this section: it stops node4 and
+node5, reads and writes in RS mode, restarts them, and polls `gateway status`
+until degraded clears. While the nodes are down it raises `GATEWAY_RETRIES` to 5
+and the per-attempt timeout so every ring candidate, including the current
+leader, is tried. Those are demo-only overrides; the normal gateway defaults
+remain 3 retries and 15 seconds.
 
 Do not edit `PEERS`, delete data volumes, or restart the whole cluster just
 because two nodes are down. Repair is automatic once quorum exists.
@@ -105,7 +216,7 @@ checksum and enqueues a read-repair task with `replace=true`. An operator can
 request a forced repair:
 
 ```powershell
-./gateway repair <key> --force
+docker compose run --rm gateway repair <key> --force
 ```
 
 The repairer reads a verified value first, re-encodes it, and replaces the shard
