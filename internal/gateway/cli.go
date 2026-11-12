@@ -5,6 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
+	"strings"
+
+	"distributed-kv-store/internal/redundancy"
 
 	pb "distributed-kv-store/proto"
 )
@@ -14,6 +19,9 @@ import (
 type Service interface {
 	Put(ctx context.Context, req *pb.PutRequest) (string, *pb.PutResponse, error)
 	Get(ctx context.Context, key string) (string, *pb.GetResponse, error)
+	Delete(ctx context.Context, req *pb.DeleteRequest) (string, *pb.DeleteResponse, error)
+	GetConfig(ctx context.Context) (string, *pb.ConfigResponse, error)
+	SetConfig(ctx context.Context, mode string) (string, *pb.ConfigResponse, error)
 }
 
 // CLI parses commands, calls the gateway client, and renders the result.
@@ -42,42 +50,291 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		fmt.Fprint(c.out, Usage())
 		return nil
 	case "put":
-		if len(args) != 3 {
-			return errors.New("put requires a key and value")
-		}
-		node, resp, err := c.svc.Put(ctx, &pb.PutRequest{Key: args[1], Value: []byte(args[2])})
-		if err != nil {
-			return fmt.Errorf("put failed: %w", err)
-		}
-		if !resp.GetSuccess() {
-			return fmt.Errorf("put rejected by %s: %s", node, resp.GetMessage())
-		}
-		fmt.Fprintf(c.out, "put committed on %s: key=%q version=%d mode=%s shards=%d/5\n",
-			node, args[1], resp.GetVersion(), resp.GetMode(), resp.GetShardsStored())
-		return nil
+		return c.runPut(ctx, args[1:])
 	case "get":
-		if len(args) != 2 {
-			return errors.New("get requires a key")
-		}
-		node, resp, err := c.svc.Get(ctx, args[1])
-		if err != nil {
-			return fmt.Errorf("get failed: %w", err)
-		}
-		fmt.Fprintf(c.out, "%s\n", resp.GetValue())
-		fmt.Fprintf(c.errOut, "served by %s (mode=%s version=%d)\n", node, resp.GetMode(), resp.GetVersion())
-		return nil
+		return c.runGet(ctx, args[1:])
+	case "delete":
+		return c.runDelete(ctx, args[1:])
+	case "mode":
+		return c.runMode(ctx, args[1:])
 	default:
 		fmt.Fprint(c.out, Usage())
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
 
-// Usage returns the command help text.
+// flagDef describes one --flag accepted by a command.
+type flagDef struct {
+	takesValue bool
+	set        func(string) error
+}
+
+// parseInterspersed parses flags wherever they appear, so both
+// "put --mode rs32 k v" and "put k v --mode rs32" work. A bare -- ends flag
+// parsing. Non-flag arguments are returned in order.
+func parseInterspersed(args []string, defs map[string]flagDef) ([]string, error) {
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if arg == "-h" {
+			arg = "--help"
+		}
+		if !strings.HasPrefix(arg, "--") {
+			positional = append(positional, arg)
+			continue
+		}
+
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
+		def, ok := defs[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown flag --%s", name)
+		}
+		if def.takesValue {
+			if !hasValue {
+				i++
+				if i >= len(args) {
+					return nil, fmt.Errorf("flag --%s requires a value", name)
+				}
+				value = args[i]
+			}
+			if err := def.set(value); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if hasValue {
+			return nil, fmt.Errorf("flag --%s does not take a value", name)
+		}
+		if def.set != nil {
+			if err := def.set(""); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return positional, nil
+}
+
+func boolFlag(target *bool) flagDef {
+	return flagDef{set: func(string) error {
+		*target = true
+		return nil
+	}}
+}
+
+func stringFlag(target *string) flagDef {
+	return flagDef{takesValue: true, set: func(value string) error {
+		*target = value
+		return nil
+	}}
+}
+
+func versionFlag(target *int64) flagDef {
+	return flagDef{takesValue: true, set: func(value string) error {
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || parsed < 0 {
+			return fmt.Errorf("--version must be a non-negative integer, got %q", value)
+		}
+		*target = parsed
+		return nil
+	}}
+}
+
+func validateMode(mode string) error {
+	parsed, err := redundancy.ParseMode(mode)
+	if err != nil {
+		return err
+	}
+	if !parsed.Valid() {
+		return fmt.Errorf("invalid mode %q: expected rs32 or replication", mode)
+	}
+	return nil
+}
+
+func (c *CLI) runPut(ctx context.Context, args []string) error {
+	var (
+		mode      string
+		version   int64
+		valueFile string
+		asJSON    bool
+		help      bool
+	)
+	positional, err := parseInterspersed(args, map[string]flagDef{
+		"mode":       stringFlag(&mode),
+		"version":    versionFlag(&version),
+		"value-file": stringFlag(&valueFile),
+		"json":       boolFlag(&asJSON),
+		"help":       boolFlag(&help),
+	})
+	if err != nil {
+		return err
+	}
+	if help {
+		fmt.Fprint(c.out, commandUsage("put"))
+		return nil
+	}
+	if len(positional) == 0 {
+		return errors.New("put requires a key")
+	}
+	if mode != "" {
+		if err := validateMode(mode); err != nil {
+			return err
+		}
+	}
+
+	key := positional[0]
+	var value []byte
+	if valueFile != "" {
+		if len(positional) > 1 {
+			return errors.New("put accepts either a positional value or --value-file, not both")
+		}
+		value, err = os.ReadFile(valueFile)
+		if err != nil {
+			return fmt.Errorf("read value file %s: %w", valueFile, err)
+		}
+	} else {
+		if len(positional) != 2 {
+			return errors.New("put requires a key and value (or use --value-file)")
+		}
+		value = []byte(positional[1])
+	}
+
+	node, resp, err := c.svc.Put(ctx, &pb.PutRequest{
+		Key:             key,
+		Value:           value,
+		Mode:            mode,
+		ExpectedVersion: version,
+	})
+	if err != nil {
+		return fmt.Errorf("put failed: %w", err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("put rejected by %s: %s", node, resp.GetMessage())
+	}
+	return renderPut(c.out, node, key, resp, asJSON)
+}
+
+func (c *CLI) runGet(ctx context.Context, args []string) error {
+	var (
+		asJSON bool
+		help   bool
+	)
+	positional, err := parseInterspersed(args, map[string]flagDef{
+		"json": boolFlag(&asJSON),
+		"help": boolFlag(&help),
+	})
+	if err != nil {
+		return err
+	}
+	if help {
+		fmt.Fprint(c.out, commandUsage("get"))
+		return nil
+	}
+	if len(positional) != 1 {
+		return errors.New("get requires exactly one key")
+	}
+
+	node, resp, err := c.svc.Get(ctx, positional[0])
+	if err != nil {
+		return fmt.Errorf("get failed: %w", err)
+	}
+	return renderGet(c.out, c.errOut, node, positional[0], resp, asJSON)
+}
+
+func (c *CLI) runDelete(ctx context.Context, args []string) error {
+	var (
+		version int64
+		asJSON  bool
+		help    bool
+	)
+	positional, err := parseInterspersed(args, map[string]flagDef{
+		"version": versionFlag(&version),
+		"json":    boolFlag(&asJSON),
+		"help":    boolFlag(&help),
+	})
+	if err != nil {
+		return err
+	}
+	if help {
+		fmt.Fprint(c.out, commandUsage("delete"))
+		return nil
+	}
+	if len(positional) != 1 {
+		return errors.New("delete requires exactly one key")
+	}
+
+	key := positional[0]
+	node, resp, err := c.svc.Delete(ctx, &pb.DeleteRequest{Key: key, ExpectedVersion: version})
+	if err != nil {
+		return fmt.Errorf("delete failed: %w", err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("delete rejected by %s: %s", node, resp.GetMessage())
+	}
+	return renderDelete(c.out, node, key, resp, asJSON)
+}
+
+func (c *CLI) runMode(ctx context.Context, args []string) error {
+	var (
+		asJSON bool
+		help   bool
+	)
+	positional, err := parseInterspersed(args, map[string]flagDef{
+		"json": boolFlag(&asJSON),
+		"help": boolFlag(&help),
+	})
+	if err != nil {
+		return err
+	}
+	if help {
+		fmt.Fprint(c.out, commandUsage("mode"))
+		return nil
+	}
+	if len(positional) > 1 {
+		return errors.New("mode accepts at most one argument: rs32 or replication")
+	}
+
+	if len(positional) == 0 {
+		node, resp, err := c.svc.GetConfig(ctx)
+		if err != nil {
+			return fmt.Errorf("read mode: %w", err)
+		}
+		if !resp.GetSuccess() {
+			return fmt.Errorf("read mode rejected by %s: %s", node, resp.GetMessage())
+		}
+		return renderMode(c.out, node, resp, false, asJSON)
+	}
+
+	mode := positional[0]
+	if err := validateMode(mode); err != nil {
+		return err
+	}
+	node, resp, err := c.svc.SetConfig(ctx, mode)
+	if err != nil {
+		return fmt.Errorf("set mode: %w", err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("set mode rejected by %s: %s", node, resp.GetMessage())
+	}
+	return renderMode(c.out, node, resp, true, asJSON)
+}
+
+// Usage returns the top-level command help text.
 func Usage() string {
 	return `Usage:
-  gateway put <key> <value>
-  gateway get <key>
-  gateway help
+  gateway <command> [arguments] [flags]
+
+Commands:
+  put     Store a value: put <key> <value> [--mode rs32|replication] [--version N] [--value-file PATH] [--json]
+  get     Fetch a value: get <key> [--json]
+  delete  Delete a key: delete <key> [--version N] [--json]
+  mode    Read or set the cluster default: mode [rs32|replication] [--json]
+  help    Show this help
+
+Run "gateway <command> --help" for command details.
 
 Environment:
   GATEWAY_NODES    required, id=host:port,... (for example node1=localhost:50051,node2=localhost:50052)
@@ -87,4 +344,37 @@ Environment:
   AUTH_TOKEN       optional bearer token
   MAX_MESSAGE_SIZE maximum gRPC message size (default 32 MiB)
 `
+}
+
+func commandUsage(command string) string {
+	switch command {
+	case "put":
+		return `Usage: gateway put <key> <value> [flags]
+       gateway put <key> --value-file PATH [flags]
+
+Flags:
+  --mode rs32|replication  Override the cluster default for this write
+  --version N              Only write when the stored version is N
+  --value-file PATH        Read the value from a file
+  --json                   Emit machine-readable JSON
+`
+	case "get":
+		return `Usage: gateway get <key> [--json]
+
+Prints the value on stdout and forwarding metadata on stderr.
+`
+	case "delete":
+		return `Usage: gateway delete <key> [--version N] [--json]
+
+Deletion is idempotent. --version makes it compare-and-delete.
+`
+	case "mode":
+		return `Usage: gateway mode [rs32|replication] [--json]
+
+With no argument, prints the cluster default. With an argument, commits a new
+cluster-wide default through Raft.
+`
+	default:
+		return Usage()
+	}
 }
