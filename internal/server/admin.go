@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"sync"
 	"time"
 
 	"distributed-kv-store/internal/consensus"
@@ -138,6 +140,259 @@ func (s *Server) forwardDelete(ctx context.Context, req *pb.DeleteRequest) (*pb.
 		return nil, err
 	}
 	return resp, nil
+}
+
+// Stats reports this node's local storage and repair counters. It never
+// forwards: every node can answer from its own SQLite file. Repair counters
+// stay at zero until task 09 introduces the shared repair queue.
+func (s *Server) Stats(ctx context.Context, _ *pb.StatsRequest) (*pb.StatsResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.Error(codes.Canceled, err.Error())
+	}
+	stats, err := s.store.Stats()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read local stats: %v", err)
+	}
+
+	leader := s.node != nil && s.node.Raft != nil && s.node.Raft.State() == raft.Leader
+	return &pb.StatsResponse{
+		NodeId:           s.cfg.NodeID,
+		Mode:             s.defaultModeForStats(),
+		Leader:           leader,
+		Keys:             nonNegative(stats.KeyCount),
+		Stripes:          nonNegative(stats.StripeCount),
+		Fragments:        nonNegative(stats.FragmentCount),
+		StorageBytes:     nonNegative(stats.Bytes),
+		RepairQueueDepth: 0,
+		RepairsCompleted: 0,
+		RepairsFailed:    0,
+		UptimeSeconds:    s.uptimeSeconds(),
+	}, nil
+}
+
+// ClusterHealth reports the leader, global mode, and an on-demand probe of
+// every Raft voter. Followers forward because only the leader has the complete
+// Raft configuration.
+func (s *Server) ClusterHealth(ctx context.Context, req *pb.ClusterHealthRequest) (*pb.ClusterHealthResponse, error) {
+	if s.node == nil || s.node.Raft == nil {
+		return nil, status.Error(codes.Internal, "raft node is not configured")
+	}
+	if s.node.Raft.State() != raft.Leader {
+		return s.forwardClusterHealth(ctx, req)
+	}
+	return s.clusterHealth(ctx)
+}
+
+// clusterHealth probes all voters in parallel with the configured short
+// timeout. This is intentionally on demand: task 09 replaces it with a cached
+// background detector and this handler will read that cache.
+func (s *Server) clusterHealth(ctx context.Context) (*pb.ClusterHealthResponse, error) {
+	configuration, err := s.raftConfiguration(s.cfg.ClusterProbeTimeout)
+	if err != nil {
+		return &pb.ClusterHealthResponse{
+			Success: false,
+			Mode:    s.defaultModeForStats(),
+			Message: fmt.Sprintf("read raft configuration: %v", err),
+		}, nil
+	}
+
+	servers := append([]raft.Server(nil), configuration.Servers...)
+	sort.Slice(servers, func(i, j int) bool {
+		return servers[i].ID < servers[j].ID
+	})
+
+	_, leaderID := s.node.Raft.LeaderWithID()
+
+	keys, err := s.store.ListKeys()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "count degraded stripes: %v", err)
+	}
+	degradedStripes := uint64(0)
+	for _, meta := range keys {
+		if meta.Degraded {
+			degradedStripes++
+		}
+	}
+
+	nodes := make([]*pb.NodeHealth, len(servers))
+	var wg sync.WaitGroup
+	for i, server := range servers {
+		wg.Add(1)
+		go func(i int, server raft.Server) {
+			defer wg.Done()
+			nodes[i] = s.probeNode(ctx, string(server.ID))
+		}(i, server)
+	}
+	wg.Wait()
+
+	healthy := uint32(0)
+	for _, node := range nodes {
+		if node.GetHealthy() {
+			healthy++
+		}
+	}
+	total := uint32(len(nodes))
+	degraded := healthy != total || degradedStripes > 0
+
+	message := fmt.Sprintf("%d/%d nodes healthy, %d degraded stripes", healthy, total, degradedStripes)
+	if leaderID == "" {
+		message = "no leader elected; " + message
+	}
+
+	return &pb.ClusterHealthResponse{
+		Success:          true,
+		LeaderId:         string(leaderID),
+		Mode:             s.defaultModeForStats(),
+		Degraded:         degraded,
+		HealthyNodes:     healthy,
+		TotalNodes:       total,
+		Nodes:            nodes,
+		DegradedStripes:  degradedStripes,
+		RepairQueueDepth: 0,
+		Message:          message,
+	}, nil
+}
+
+// probeNode asks one voter for NodeStatus and Stats. A node is healthy only
+// when both queries succeed. The local node is probed in-process; remote nodes
+// use the injected dialer, which carries AUTH_TOKEN in production.
+func (s *Server) probeNode(ctx context.Context, nodeID string) *pb.NodeHealth {
+	health := &pb.NodeHealth{
+		NodeId:   nodeID,
+		GrpcAddr: s.grpcAddrFor(nodeID),
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, s.cfg.ClusterProbeTimeout)
+	defer cancel()
+
+	var (
+		status *pb.NodeStatusResponse
+		stats  *pb.StatsResponse
+		err    error
+	)
+	if nodeID == s.cfg.NodeID {
+		status, err = s.NodeStatus(probeCtx, &pb.NodeStatusRequest{})
+	} else {
+		status, err = s.remoteNodeStatus(probeCtx, nodeID)
+	}
+	if err != nil {
+		health.Error = "node_status: " + err.Error()
+		return health
+	}
+
+	health.RaftState = status.GetState()
+	health.Leader = status.GetState() == raft.Leader.String()
+
+	if nodeID == s.cfg.NodeID {
+		stats, err = s.Stats(probeCtx, &pb.StatsRequest{})
+	} else {
+		stats, err = s.remoteStats(probeCtx, nodeID)
+	}
+	if err != nil {
+		health.Error = "stats: " + err.Error()
+		return health
+	}
+
+	health.Healthy = true
+	health.LastSeenUnix = time.Now().Unix()
+	health.Fragments = stats.GetFragments()
+	health.StorageBytes = stats.GetStorageBytes()
+	return health
+}
+
+func (s *Server) remoteNodeStatus(ctx context.Context, nodeID string) (*pb.NodeStatusResponse, error) {
+	client, closer, err := s.peerClient(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer closer()
+	return client.NodeStatus(ctx, &pb.NodeStatusRequest{})
+}
+
+func (s *Server) remoteStats(ctx context.Context, nodeID string) (*pb.StatsResponse, error) {
+	client, closer, err := s.peerClient(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer closer()
+	return client.Stats(ctx, &pb.StatsRequest{})
+}
+
+// peerClient dials a peer through the cached connection pool. It returns a
+// no-op closer because the pool owns connection lifetime; dropConn is used on
+// transport failures elsewhere.
+func (s *Server) peerClient(ctx context.Context, nodeID string) (pb.StorageServiceClient, func(), error) {
+	target := s.grpcAddrFor(nodeID)
+	if target == "" {
+		return nil, nil, fmt.Errorf("no gRPC address for node %q", nodeID)
+	}
+	conn, err := s.getConn(ctx, target)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial %q: %w", nodeID, err)
+	}
+	return pb.NewStorageServiceClient(conn), func() {}, nil
+}
+
+// grpcAddrFor resolves a node ID to its gRPC address. The local node falls
+// back to its advertised PEERS entry, then to NODE_ID:PORT.
+func (s *Server) grpcAddrFor(nodeID string) string {
+	if addr, ok := s.cfg.Peers[nodeID]; ok && addr != "" {
+		return addr
+	}
+	if nodeID == s.cfg.NodeID && s.cfg.GRPCPort != "" {
+		return fmt.Sprintf("%s:%s", s.cfg.NodeID, s.cfg.GRPCPort)
+	}
+	return ""
+}
+
+// raftConfiguration reads the current Raft configuration with a bounded wait.
+func (s *Server) raftConfiguration(timeout time.Duration) (raft.Configuration, error) {
+	if timeout <= 0 {
+		timeout = s.cfg.ClusterProbeTimeout
+	}
+	future := s.node.Raft.GetConfiguration()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- future.Error()
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return raft.Configuration{}, err
+		}
+		return future.Configuration(), nil
+	case <-timer.C:
+		return raft.Configuration{}, context.DeadlineExceeded
+	}
+}
+
+func (s *Server) forwardClusterHealth(ctx context.Context, req *pb.ClusterHealthRequest) (*pb.ClusterHealthResponse, error) {
+	var resp *pb.ClusterHealthResponse
+	err := s.forwardToLeader(ctx, func(fctx context.Context, client pb.StorageServiceClient) error {
+		out, err := client.ClusterHealth(fctx, req)
+		if err != nil {
+			return err
+		}
+		resp = out
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// nonNegative clamps a store counter to uint64 for the proto field.
+func nonNegative(value int64) uint64 {
+	if value < 0 {
+		return 0
+	}
+	return uint64(value)
 }
 
 // getConfig applies a get_config command on the leader. The FSM reports the

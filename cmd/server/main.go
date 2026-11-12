@@ -105,7 +105,11 @@ func main() {
 	)
 
 	grpcServer := grpc.NewServer(grpcOpts...)
-	pb.RegisterStorageServiceServer(grpcServer, server.New(cfg, store, node, nil))
+	storageServer := server.New(cfg, store, node, nil)
+	if err := storageServer.CheckAuth(); err != nil {
+		log.Fatalf("Invalid authorization configuration: %v", err)
+	}
+	pb.RegisterStorageServiceServer(grpcServer, storageServer)
 
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)

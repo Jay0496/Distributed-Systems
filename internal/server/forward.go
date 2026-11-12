@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"distributed-kv-store/internal/config"
+	"distributed-kv-store/internal/rpc"
 
 	pb "distributed-kv-store/proto"
 
@@ -25,10 +26,16 @@ const (
 // dialFunc abstracts gRPC dialing so tests can inject in-memory transports.
 type dialFunc func(ctx context.Context, target string) (*grpc.ClientConn, error)
 
-// newDialFunc returns the production dialer. TLS is used when configured.
+// newDialFunc returns the production dialer. TLS is used when configured, and
+// the shared rpc helper attaches AUTH_TOKEN and raises the gRPC message limit
+// for every internal client.
 func newDialFunc(cfg config.Config) dialFunc {
+	shared, sharedErr := rpc.DialOptions(cfg.AuthToken, cfg.MaxMessageSize)
 	return func(ctx context.Context, target string) (*grpc.ClientConn, error) {
-		var opts []grpc.DialOption
+		if sharedErr != nil {
+			return nil, sharedErr
+		}
+		opts := append([]grpc.DialOption(nil), shared...)
 		if cfg.TLSEnabled {
 			creds, err := credentials.NewClientTLSFromFile(cfg.TLSCA, "")
 			if err != nil {
@@ -38,15 +45,7 @@ func newDialFunc(cfg config.Config) dialFunc {
 		} else {
 			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		}
-		// Keep both call-size limits aligned with the server. Without these the
-		// gRPC 4 MiB default would cap forwarded values and fragment chunks.
-		opts = append(opts,
-			grpc.WithDefaultCallOptions(
-				grpc.MaxCallRecvMsgSize(cfg.MaxMessageSize),
-				grpc.MaxCallSendMsgSize(cfg.MaxMessageSize),
-			),
-			grpc.WithBlock(),
-		)
+		opts = append(opts, grpc.WithBlock())
 		return grpc.DialContext(ctx, target, opts...)
 	}
 }

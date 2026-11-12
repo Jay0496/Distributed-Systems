@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/redundancy"
 
 	pb "distributed-kv-store/proto"
@@ -279,4 +280,159 @@ func TestServerDeleteRPCs(t *testing.T) {
 			t.Fatalf("Delete empty key = %v, want InvalidArgument", err)
 		}
 	})
+}
+
+func TestServerStatsAndHealth(t *testing.T) {
+	c := newTestCluster(t, 5)
+	leader := c.waitLeader(t)
+	follower := c.waitFollower(t)
+
+	ctx, cancel := ctxWithTimeout(t, 15*time.Second)
+	defer cancel()
+	for _, key := range []string{"stats-a", "stats-b"} {
+		resp, err := leader.client.Put(ctx, &pb.PutRequest{
+			Key:   key,
+			Value: []byte("stats-value"),
+			Mode:  string(redundancy.ModeRS32),
+		})
+		if err != nil || !resp.GetSuccess() {
+			t.Fatalf("Put(%q): resp=%+v err=%v", key, resp, err)
+		}
+		waitForMetaVersion(t, c, key, 1)
+	}
+
+	t.Run("local stats reflect committed writes", func(t *testing.T) {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ctx, cancel := ctxWithTimeout(t, 5*time.Second)
+			stats, err := follower.client.Stats(ctx, &pb.StatsRequest{})
+			cancel()
+			if err != nil {
+				t.Fatalf("Stats: %v", err)
+			}
+			if stats.GetNodeId() != follower.id {
+				t.Fatalf("node_id = %q, want %q", stats.GetNodeId(), follower.id)
+			}
+			if stats.GetLeader() {
+				t.Fatalf("follower %s reported leader=true", follower.id)
+			}
+			if stats.GetMode() != string(redundancy.ModeRS32) {
+				t.Fatalf("mode = %q, want rs32", stats.GetMode())
+			}
+			if stats.GetKeys() == 2 && stats.GetStripes() == 2 {
+				if stats.GetFragments() == 0 {
+					t.Fatal("stats reported no fragments after two writes")
+				}
+				if stats.GetUptimeSeconds() < 0 {
+					t.Fatalf("uptime = %d", stats.GetUptimeSeconds())
+				}
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("stats did not converge: keys=%d stripes=%d fragments=%d",
+					stats.GetKeys(), stats.GetStripes(), stats.GetFragments())
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	})
+
+	t.Run("health lists five healthy nodes and forwards", func(t *testing.T) {
+		ctx, cancel := ctxWithTimeout(t, 15*time.Second)
+		defer cancel()
+
+		health, err := follower.client.ClusterHealth(ctx, &pb.ClusterHealthRequest{})
+		if err != nil {
+			t.Fatalf("ClusterHealth: %v", err)
+		}
+		if !health.GetSuccess() {
+			t.Fatalf("ClusterHealth rejected: %s", health.GetMessage())
+		}
+		if health.GetLeaderId() != leader.id {
+			t.Fatalf("leader_id = %q, want %q", health.GetLeaderId(), leader.id)
+		}
+		if health.GetTotalNodes() != 5 || health.GetHealthyNodes() != 5 {
+			t.Fatalf("health = %d/%d nodes, want 5/5", health.GetHealthyNodes(), health.GetTotalNodes())
+		}
+		if health.GetDegraded() {
+			t.Fatalf("healthy cluster reported degraded: %s", health.GetMessage())
+		}
+		if len(health.GetNodes()) != 5 {
+			t.Fatalf("health listed %d nodes, want 5", len(health.GetNodes()))
+		}
+	})
+
+	t.Run("an unreachable node and a degraded write mark the cluster degraded", func(t *testing.T) {
+		target := ""
+		for _, tn := range c.nodes {
+			if tn.id != leader.id {
+				target = tn.id
+				break
+			}
+		}
+		if target == "" {
+			t.Fatal("no non-leader node to make unreachable")
+		}
+		c.SetUnreachable(target)
+		t.Cleanup(func() { c.SetReachable(target) })
+
+		ctx, cancel := ctxWithTimeout(t, 15*time.Second)
+		defer cancel()
+		put, err := leader.client.Put(ctx, &pb.PutRequest{
+			Key:   "degraded-health",
+			Value: []byte("value"),
+			Mode:  string(redundancy.ModeRS32),
+		})
+		if err != nil || !put.GetSuccess() {
+			t.Fatalf("degraded Put: resp=%+v err=%v", put, err)
+		}
+		if !put.GetDegraded() {
+			t.Fatalf("write with an unreachable owner was not degraded: %+v", put)
+		}
+
+		health, err := leader.client.ClusterHealth(ctx, &pb.ClusterHealthRequest{})
+		if err != nil {
+			t.Fatalf("ClusterHealth: %v", err)
+		}
+		if !health.GetDegraded() {
+			t.Fatalf("health did not report degraded: %+v", health)
+		}
+		if health.GetHealthyNodes() != 4 || health.GetTotalNodes() != 5 {
+			t.Fatalf("health = %d/%d nodes, want 4/5", health.GetHealthyNodes(), health.GetTotalNodes())
+		}
+		if health.GetDegradedStripes() == 0 {
+			t.Fatal("degraded stripe count is zero")
+		}
+		var found bool
+		for _, node := range health.GetNodes() {
+			if node.GetNodeId() == target {
+				found = true
+				if node.GetHealthy() {
+					t.Fatalf("unreachable node %s reported healthy", target)
+				}
+				if node.GetError() == "" {
+					t.Fatalf("unreachable node %s reported no error", target)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("health response omitted %s", target)
+		}
+	})
+}
+
+func TestCheckAuth(t *testing.T) {
+	open := &Server{cfg: config.Config{}}
+	if err := open.CheckAuth(); err != nil {
+		t.Fatalf("auth-disabled server CheckAuth = %v", err)
+	}
+
+	locked := &Server{cfg: config.Config{AuthToken: "token"}}
+	if err := locked.CheckAuth(); err == nil {
+		t.Fatal("AUTH_TOKEN without an authorizer did not refuse to start")
+	}
+
+	locked.SetAuthorizer(allowAllAuthorizer{})
+	if err := locked.CheckAuth(); err != nil {
+		t.Fatalf("configured authorizer rejected: %v", err)
+	}
 }
