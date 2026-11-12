@@ -1,4 +1,4 @@
-package gateway
+package gateway_test
 
 import (
 	"bytes"
@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"distributed-kv-store/internal/gateway"
 
 	pb "distributed-kv-store/proto"
 )
@@ -181,11 +183,11 @@ func healthyClusterResponse() *pb.ClusterHealthResponse {
 	return resp
 }
 
-func newTestCLI(t *testing.T, svc Service) (*CLI, *bytes.Buffer, *bytes.Buffer) {
+func newTestCLI(t *testing.T, svc gateway.Service) (*gateway.CLI, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	out := &bytes.Buffer{}
 	errOut := &bytes.Buffer{}
-	return NewCLI(svc, out, errOut), out, errOut
+	return gateway.NewCLI(svc, out, errOut), out, errOut
 }
 
 func TestCLIPutParsesInterspersedFlags(t *testing.T) {
