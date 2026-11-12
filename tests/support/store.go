@@ -1,5 +1,3 @@
-// Package support holds shared test doubles and harnesses. Production packages
-// must never import this package.
 package support
 
 import (
