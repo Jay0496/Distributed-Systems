@@ -1,6 +1,9 @@
 x-common-env: &common-env
   DATA_DIR: /data
   PEERS: node1=node1:50051,node2=node2:50052,node3=node3:50053,node4=node4:50054,node5=node5:50055
+  # Empty disables auth. Set the same value for the cluster and the gateway.
+  AUTH_TOKEN: ${AUTH_TOKEN:-}
+  MAX_MESSAGE_SIZE: ${MAX_MESSAGE_SIZE:-33554432}
 
 x-healthcheck: &healthcheck
   interval: 5s
