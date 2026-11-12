@@ -46,6 +46,26 @@ const (
 // requires an authorizer; server-side enforcement lands in task 10.
 const DefaultClusterProbeTimeout = 1 * time.Second
 
+// Failure management defaults. The detector probes every DETECT_INTERVAL with
+// DETECT_TIMEOUT, marks a node down after DETECT_FAILURES consecutive failures,
+// and marks it up after DETECT_SUCCESSES consecutive successes. Repair is
+// bounded by REPAIR_WORKERS and REPAIR_MAX_ATTEMPTS, sweeps every
+// REPAIR_SWEEP_INTERVAL, and limits each owner to REPAIR_RATE_LIMIT uploads per
+// second. Orphan fragments are kept for ORPHAN_GRACE_PERIOD so an in-flight
+// write cannot lose data before its metadata commits.
+const (
+	DefaultDetectInterval      = 2 * time.Second
+	DefaultDetectTimeout       = 1 * time.Second
+	DefaultDetectFailures      = 3
+	DefaultDetectSuccesses     = 1
+	DefaultRepairWorkers       = 2
+	DefaultRepairMaxAttempts   = 5
+	DefaultRepairSweepInterval = 60 * time.Second
+	DefaultRepairRateLimit     = 20
+	DefaultOrphanGracePeriod   = 10 * time.Minute
+	DefaultOrphanMaxIndexLag   = 1000
+)
+
 // Config holds the runtime configuration for a single storage node.
 type Config struct {
 	NodeID     string
@@ -97,6 +117,32 @@ type Config struct {
 	// RPCs. Empty disables auth. Task 10 adds server-side enforcement.
 	AuthToken string
 
+	// DetectInterval is the failure-detector probe period (default 2s).
+	DetectInterval time.Duration
+	// DetectTimeout bounds one detector probe (default 1s).
+	DetectTimeout time.Duration
+	// DetectFailures is the consecutive-failure threshold that marks a node
+	// down (default 3).
+	DetectFailures int
+	// DetectSuccesses is the consecutive-success threshold that marks a node
+	// up (default 1).
+	DetectSuccesses int
+	// RepairWorkers bounds concurrent repair handlers (default 2).
+	RepairWorkers int
+	// RepairMaxAttempts bounds retries per repair task (default 5).
+	RepairMaxAttempts int
+	// RepairSweepInterval is the periodic metadata sweep period (default 60s).
+	RepairSweepInterval time.Duration
+	// RepairRateLimit bounds uploads per owner per second (default 20).
+	RepairRateLimit int
+	// OrphanGracePeriod protects recently written fragments from the orphan
+	// sweep (default 10m).
+	OrphanGracePeriod time.Duration
+	// OrphanMaxIndexLag bounds how far this node's applied index may trail the
+	// leader's commit index before the orphan sweep skips a pass (default
+	// 1000).
+	OrphanMaxIndexLag uint64
+
 	// BootstrapServers maps Raft server ID -> Raft address.
 	BootstrapServers map[string]string
 	// Peers maps Raft server ID -> gRPC address.
@@ -126,6 +172,16 @@ func Load() Config {
 		ReadRepairWorkers:   intOr("READ_REPAIR_WORKERS", DefaultReadRepairWorkers),
 		ClusterProbeTimeout: durationOr("CLUSTER_PROBE_TIMEOUT", DefaultClusterProbeTimeout),
 		AuthToken:           strings.TrimSpace(os.Getenv("AUTH_TOKEN")),
+		DetectInterval:      durationOr("DETECT_INTERVAL", DefaultDetectInterval),
+		DetectTimeout:       durationOr("DETECT_TIMEOUT", DefaultDetectTimeout),
+		DetectFailures:      intOr("DETECT_FAILURES", DefaultDetectFailures),
+		DetectSuccesses:     intOr("DETECT_SUCCESSES", DefaultDetectSuccesses),
+		RepairWorkers:       intOr("REPAIR_WORKERS", DefaultRepairWorkers),
+		RepairMaxAttempts:   intOr("REPAIR_MAX_ATTEMPTS", DefaultRepairMaxAttempts),
+		RepairSweepInterval: durationOr("REPAIR_SWEEP_INTERVAL", DefaultRepairSweepInterval),
+		RepairRateLimit:     intOr("REPAIR_RATE_LIMIT", DefaultRepairRateLimit),
+		OrphanGracePeriod:   durationOr("ORPHAN_GRACE_PERIOD", DefaultOrphanGracePeriod),
+		OrphanMaxIndexLag:   uint64Or("ORPHAN_MAX_INDEX_LAG", DefaultOrphanMaxIndexLag),
 		Bootstrap:           os.Getenv("BOOTSTRAP") == "true",
 		JoinAddr:            os.Getenv("JOIN_ADDR"),
 		TLSEnabled:          os.Getenv("TLS_ENABLED") == "true",
@@ -175,6 +231,36 @@ func (c Config) WithDefaults() Config {
 	if c.ClusterProbeTimeout <= 0 {
 		c.ClusterProbeTimeout = DefaultClusterProbeTimeout
 	}
+	if c.DetectInterval <= 0 {
+		c.DetectInterval = DefaultDetectInterval
+	}
+	if c.DetectTimeout <= 0 {
+		c.DetectTimeout = DefaultDetectTimeout
+	}
+	if c.DetectFailures <= 0 {
+		c.DetectFailures = DefaultDetectFailures
+	}
+	if c.DetectSuccesses <= 0 {
+		c.DetectSuccesses = DefaultDetectSuccesses
+	}
+	if c.RepairWorkers <= 0 {
+		c.RepairWorkers = DefaultRepairWorkers
+	}
+	if c.RepairMaxAttempts <= 0 {
+		c.RepairMaxAttempts = DefaultRepairMaxAttempts
+	}
+	if c.RepairSweepInterval <= 0 {
+		c.RepairSweepInterval = DefaultRepairSweepInterval
+	}
+	if c.RepairRateLimit <= 0 {
+		c.RepairRateLimit = DefaultRepairRateLimit
+	}
+	if c.OrphanGracePeriod <= 0 {
+		c.OrphanGracePeriod = DefaultOrphanGracePeriod
+	}
+	if c.OrphanMaxIndexLag == 0 {
+		c.OrphanMaxIndexLag = DefaultOrphanMaxIndexLag
+	}
 	return c
 }
 
@@ -206,6 +292,19 @@ func durationOr(key string, fallback time.Duration) time.Duration {
 	value, err := time.ParseDuration(raw)
 	if err != nil || value <= 0 {
 		fmt.Fprintf(os.Stderr, "invalid %s %q, using %s\n", key, raw, fallback)
+		return fallback
+	}
+	return value
+}
+
+func uint64Or(key string, fallback uint64) uint64 {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+	if err != nil || value == 0 {
+		fmt.Fprintf(os.Stderr, "invalid %s %q, using %d\n", key, raw, fallback)
 		return fallback
 	}
 	return value
