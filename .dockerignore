@@ -1,8 +1,16 @@
 .git
 .gitignore
+.github
+.opencode
 docs
+scripts
 *.pdf
 *.db
 *.db-shm
 *.db-wal
+*.log
 node_modules
+bin
+data
+/tmp
+coverage.out
