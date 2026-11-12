@@ -20,6 +20,16 @@ func main() {
 }
 
 func run(args []string) error {
+	// Help must not require a configured cluster: it is the first thing a new
+	// operator runs, including inside `docker run --entrypoint /app/gateway`.
+	if len(args) > 0 {
+		switch args[0] {
+		case "help", "--help", "-h":
+			fmt.Fprint(os.Stdout, gateway.Usage())
+			return nil
+		}
+	}
+
 	cfg, err := config.LoadGatewayConfig()
 	if err != nil {
 		return err
