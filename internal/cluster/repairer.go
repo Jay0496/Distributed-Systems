@@ -46,6 +46,7 @@ type Repairer struct {
 
 	mu       sync.RWMutex
 	detector *Detector
+	orphan   *OrphanSweeper
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -96,8 +97,15 @@ func (r *Repairer) SetDetector(detector *Detector) {
 	r.mu.Unlock()
 }
 
-// Start begins the detector event loop and the leader metadata sweep. It is
-// idempotent.
+// SetOrphanSweeper attaches the node-local orphan fragment sweeper.
+func (r *Repairer) SetOrphanSweeper(sweeper *OrphanSweeper) {
+	r.mu.Lock()
+	r.orphan = sweeper
+	r.mu.Unlock()
+}
+
+// Start begins the detector event loop, the leader metadata sweep, and the
+// node-local orphan sweep. It is idempotent.
 func (r *Repairer) Start(ctx context.Context) {
 	r.startOnce.Do(func() {
 		runCtx, cancel := context.WithCancel(ctx)
@@ -115,6 +123,8 @@ func (r *Repairer) Start(ctx context.Context) {
 
 		r.wg.Add(1)
 		go r.sweepLoop(runCtx)
+		r.wg.Add(1)
+		go r.orphanLoop(runCtx)
 	})
 }
 
@@ -310,6 +320,39 @@ func (r *Repairer) sweepLoop(ctx context.Context) {
 		case <-ticker.C:
 			if r.Active() {
 				r.enqueueDegraded(ctx)
+			}
+		}
+	}
+}
+
+// orphanLoop runs on every node, including followers, because fragments are
+// node-local. Reconstruction and uploads remain leader-gated.
+func (r *Repairer) orphanLoop(ctx context.Context) {
+	defer r.wg.Done()
+
+	r.mu.RLock()
+	sweeper := r.orphan
+	r.mu.RUnlock()
+	if sweeper == nil {
+		return
+	}
+
+	ticker := time.NewTicker(r.opts.SweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			result, err := sweeper.Sweep(ctx)
+			if err != nil {
+				r.opts.Logf("orphan: sweep failed: %v", err)
+				continue
+			}
+			if result.Deleted > 0 {
+				r.orphansDeleted.Add(uint64(result.Deleted))
+				r.opts.Logf("orphan: swept %d fragments (examined=%d kept=%d skipped=%v)",
+					result.Deleted, result.Examined, result.Kept, result.Skipped)
 			}
 		}
 	}

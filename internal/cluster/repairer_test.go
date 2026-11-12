@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"distributed-kv-store/internal/redundancy"
 	"distributed-kv-store/internal/storage"
@@ -317,5 +318,85 @@ func TestRepairerNeverRepairsFromSubQuorum(t *testing.T) {
 	}
 	if len(uploader.uploads) != 0 {
 		t.Fatalf("sub-quorum repair uploaded %d shards", len(uploader.uploads))
+	}
+}
+
+func TestRepairerEnqueuesReturningNodePlacements(t *testing.T) {
+	value := []byte("returning")
+	meta, _ := repairTestMeta(t, "return", "rs32", value, false)
+
+	tasks := make(chan Task, 8)
+	queue := NewQueue(QueueOptions{Workers: 1, Capacity: 16}, func(_ context.Context, task Task) error {
+		tasks <- task
+		return nil
+	})
+	defer queue.Close()
+
+	repairer := NewRepairer(RepairerOptions{
+		Store:      &repairTestStore{metas: map[string]storage.KeyMeta{meta.Key: meta}},
+		Reader:     &repairTestReader{value: value},
+		Uploader:   &repairTestUploader{},
+		Statter:    newRepairTestStatter(),
+		MetaStatus: &repairTestMetaStatus{},
+		Nodes:      []string{"node1", "node2", "node3", "node4", "node5"},
+		SelfNode:   "node1",
+		RateLimit:  10000,
+		Logf:       func(string, ...any) {},
+	})
+	repairer.SetQueue(queue)
+
+	repairer.enqueuePlacedOn(context.Background(), "node4", PriorityReturning)
+
+	select {
+	case task := <-tasks:
+		if task.Owner != "node4" {
+			t.Fatalf("task owner = %q, want node4", task.Owner)
+		}
+		if task.Priority != PriorityReturning {
+			t.Fatalf("priority = %v, want returning", task.Priority)
+		}
+		if task.StripeID != meta.StripeID {
+			t.Fatalf("stripe = %q, want %q", task.StripeID, meta.StripeID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("returning node placement was not enqueued")
+	}
+}
+
+func TestRepairerEnqueuesAllDegradedPlacements(t *testing.T) {
+	value := []byte("degraded")
+	meta, _ := repairTestMeta(t, "degraded", "rs32", value, true)
+
+	tasks := make(chan Task, 8)
+	queue := NewQueue(QueueOptions{Workers: 1, Capacity: 16}, func(_ context.Context, task Task) error {
+		tasks <- task
+		return nil
+	})
+	defer queue.Close()
+
+	repairer := NewRepairer(RepairerOptions{
+		Store:      &repairTestStore{metas: map[string]storage.KeyMeta{meta.Key: meta}},
+		Reader:     &repairTestReader{value: value},
+		Uploader:   &repairTestUploader{},
+		Statter:    newRepairTestStatter(),
+		MetaStatus: &repairTestMetaStatus{},
+		Nodes:      []string{"node1", "node2", "node3", "node4", "node5"},
+		SelfNode:   "node1",
+		RateLimit:  10000,
+		Logf:       func(string, ...any) {},
+	})
+	repairer.SetQueue(queue)
+
+	repairer.enqueueDegraded(context.Background())
+
+	seen := make(map[int]bool)
+	deadline := time.After(2 * time.Second)
+	for len(seen) < 5 {
+		select {
+		case task := <-tasks:
+			seen[task.ShardIndex] = true
+		case <-deadline:
+			t.Fatalf("saw %d degraded placements, want 5", len(seen))
+		}
 	}
 }

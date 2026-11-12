@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -136,6 +137,14 @@ func main() {
 		IsLeader:  func() bool { return node.Raft.State() == raft.Leader },
 		LeaderCh:  node.Raft.LeaderCh(),
 	})
+	if repairer := storageServer.Repairer(); repairer != nil {
+		repairer.SetOrphanSweeper(cluster.NewOrphanSweeper(cluster.OrphanSweeperOptions{
+			Store:       store,
+			SelfNode:    cfg.NodeID,
+			GracePeriod: cfg.OrphanGracePeriod,
+			Guard:       orphanGuard(node, cfg.OrphanMaxIndexLag),
+		}))
+	}
 	storageServer.AttachFailureManagement(failureCtx, detector)
 
 	// Shut down cleanly on SIGINT/SIGTERM so the BoltDB file lock is released
@@ -176,6 +185,28 @@ func detectorNodes(cfg config.Config) map[string]string {
 		nodes[cfg.NodeID] = fmt.Sprintf("%s:%s", cfg.NodeID, cfg.GRPCPort)
 	}
 	return nodes
+}
+
+// orphanGuard prevents a stale node from deleting fragments for metadata it has
+// not applied yet. A pass requires a known leader and an applied index within
+// ORPHAN_MAX_INDEX_LAG of the leader-reported commit index.
+func orphanGuard(node *consensus.Node, maxLag uint64) func(context.Context) (bool, error) {
+	return func(context.Context) (bool, error) {
+		if node == nil || node.Raft == nil {
+			return false, nil
+		}
+		_, leaderID := node.Raft.LeaderWithID()
+		if leaderID == "" {
+			return false, nil
+		}
+		stats := node.Raft.Stats()
+		commit, _ := strconv.ParseUint(stats["commit_index"], 10, 64)
+		applied := node.Raft.AppliedIndex()
+		if commit > 0 && applied+maxLag < commit {
+			return false, nil
+		}
+		return true, nil
+	}
 }
 
 // joinCluster asks the node configured in JOIN_ADDR to add this node as a
