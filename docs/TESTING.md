@@ -1,83 +1,48 @@
 # Testing Guide
 
-All commands run inside Docker; Go is not required on the host. From the
-repository root on Windows PowerShell:
+The suite has four layers: fast unit tests, in-process integration tests,
+Compose-backed integration checks, and destructive chaos scenarios. All commands
+run from the repository root inside Docker; Go is not required on the host.
 
 ```powershell
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 <command>
 ```
 
-On macOS/Linux, replace `${PWD}` with `$(pwd)`.
+On macOS/Linux replace `${PWD}` with `$(pwd)`. The layout, build tags, and
+white-box exception list live in [tests/README.md](../tests/README.md).
 
-## Script runner
+## Quick commands
 
-The deployment scripts wrap the common cases and handle cluster startup,
-health-waiting, the pinned network name, and `AUTH_TOKEN` for you:
+| Goal | Command |
+| --- | --- |
+| Unit + in-process integration | `go test -race -count=1 ./...` |
+| Unit only | `go test -race -count=1 ./tests/unit/...` |
+| In-process integration only | `go test -race -count=1 ./tests/integration/...` |
+| Chaos | `go test -race -tags=chaos -count=1 ./tests/chaos/...` |
+| Compose checks | `go test -tags=integration -count=1 ./tests/integration/...` |
+| Flakiness check | `go test -race -count=3 ./tests/...` |
+
+The script runner wraps cluster startup, health waiting, the pinned network name,
+and `AUTH_TOKEN`:
 
 ```powershell
-./scripts/test.ps1                 # unit and component tests
-./scripts/test.ps1 -Integration    # starts the cluster and runs tagged tests
-./scripts/test.ps1 -Chaos          # chaos-tagged suite
-./scripts/test.ps1 -Bench          # benchmark-tagged suite (placeholder)
+./scripts/test.ps1                 # fast suite
+./scripts/test.ps1 -Integration    # starts Compose when needed
+./scripts/test.ps1 -Chaos          # chaos suite
+./scripts/test.ps1 -Bench          # benchmark placeholder until task 13
 ./scripts/test.ps1 -Integration -Keep
 ```
 
 ```bash
-./scripts/test.sh                  # unit and component tests
+./scripts/test.sh                  # fast suite
 ./scripts/test.sh --integration
 ./scripts/test.sh --chaos
 ./scripts/test.sh --bench
-./scripts/test.sh --integration --keep
 ```
 
 `test` starts the cluster only when fewer than five nodes are healthy and tears
-down only a cluster it started. `-Keep` / `--keep` leaves that cluster running.
-Integration containers run on `distributed-systems_cluster-net`; `AUTH_TOKEN` is
-passed with `-e AUTH_TOKEN` (the value is copied from the environment, never
-printed). `tests/cluster_test.go` reads `GATEWAY_NODES` when set and otherwise
-uses the five Compose defaults.
-
-## Test matrix
-
-| File | Level | What it covers | Needs Compose? |
-| --- | --- | --- | --- |
-| `tests/unit/config/config_test.go` | unit | defaults, env overrides, store path/busy timeout, fragment size/message/chunk/timeout limits, peer-map parsing, malformed entries, whitespace | no |
-| `tests/unit/proto/fragment_contract_test.go` | unit | generated fragment v2 getters, legacy field compatibility, new operation messages | no |
-| `tests/unit/storage/` | unit | schema and indexes, sentinel errors, metadata transactions, replay/conflict handling, fragments, config, stats, legacy and metadata snapshots, factory defaults, support `MockStore` | no |
-| `internal/storage/sqlite_test.go` | unit | SQLite reopen persistence, data/parity round trips, concurrency, close | no |
-| `internal/consensus/fsm_test.go` | unit | put, get, missing key, bad JSON, unknown op, snapshot persistence and restore, stores without `Snapshotter` | no |
-| `internal/consensus/raft_test.go` | component | 3-node election and replication, leader failover, BoltDB log replay after restart, SQLite snapshot restore with a fresh database | no (in-memory transports) |
-| `internal/gateway/router_test.go` | unit | deterministic routing, key distribution, ring wrap-around, empty ring | no |
-| `internal/server/server_test.go` | component | gRPC handlers over `bufconn`: leader writes, follower forwarding, metadata commits, `NodeStatus` agreement, health, mode validation, loop guard, `Join` | no (in-process Raft + bufconn) |
-| `internal/server/write_test.go` | component | write validation, mode resolution, version allocation, upload quorum, commit outcomes, overwrite GC | no (bufconn + fake apply) |
-| `internal/server/read_test.go` | component | RS and replication reads, missing/corrupt shards, local fast path, read-repair queue and saturation, explicit NotFound/FailedPrecondition/DataLoss/DeadlineExceeded/Internal mapping, `ReadVerified` without repair | no (fake apply + local store) |
-| `internal/server/admin_test.go` | component | config get/set with follower forwarding and mode precedence, delete ordering/GC/idempotency, local stats, cluster health and degraded reporting, auth startup guard | no (in-process Raft + bufconn) |
-| `internal/rpc/credentials_test.go` | unit | `AUTH_TOKEN` parsing, bearer metadata append, unary token propagation, empty-token behaviour, message-limit validation | no (bufconn) |
-| `internal/cluster/repair_queue_test.go` | unit | bounded worker queue, handler execution, `ErrRepairQueueFull`, idempotent close | no |
-| `internal/server/fragment_push_test.go` | component | concurrent shard uploads, local-owner fast path, unreachable owners, checksum rejection | no (bufconn) |
-| `internal/server/fragments_test.go` | component | fragment transport over `bufconn`: single/multi-chunk uploads, offsets, consistency, idempotent retry and `AlreadyExists`, replacement, limits, empty fragments, download streaming, delete/list/stat, oversized messages, concurrency, cancellation and timeouts | no (bufconn) |
-| `tests/integration/write_path_test.go` | integration (in-process) | five-node Raft + SQLite write path: RS shard placement, replication copies, degraded writes, quorum rejection, overwrite GC | no |
-| `tests/integration/read_path_test.go` | integration (in-process) | five-node read path: RS reads with two owners down, corrupt-shard read repair, replication fallback from one remote copy, three-shard failure, NotFound forwarding | no |
-| `tests/integration/admin_test.go` | integration (in-process) | config persistence across a node restart, delete metadata and fragment GC, local stats after writes, leader/degraded health with an unreachable node | no |
-| `tests/cluster_test.go` | integration | five-node Compose cluster: leader agreement and write through a follower; read-path coverage lives in the in-process suite | yes (`-tags=integration`) |
-
-The integration file carries `//go:build integration`, so the default
-`go test ./...` is green even when no cluster is running. The target layout,
-build tags, and temporary white-box exceptions are documented in
-[tests/README.md](../tests/README.md).
-
-## Unit and component tests
-
-```powershell
-# Everything, with the race detector
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -count=1 ./...
-
-# One package, verbose
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./internal/consensus/...
-
-# One test
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -run TestRaftLeaderFailover ./internal/consensus/
-```
+down only a cluster it started. Integration containers use
+`distributed-systems_cluster-net`; scripts pass `AUTH_TOKEN` without printing it.
 
 Static checks:
 
@@ -85,127 +50,129 @@ Static checks:
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 go build ./...
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 go vet ./...
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 go vet -tags=integration ./...
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go vet -tags=chaos ./...
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 gofmt -l .
 ```
 
-`go vet -tags=integration` is important: `go vet ./...` does not compile files
-excluded by build tags, so integration code can rot silently.
+`go vet ./...` skips files excluded by build tags, so the tagged vet commands are
+part of the acceptance run.
 
-### SQLite store tests
+## Build tags
 
-`internal/storage` and `tests/unit/storage` use temporary SQLite databases, so
-they need no external service and never touch `/data`:
+- **No tag:** unit tests and the in-process five-node integration suite. These
+  run on a clean checkout with no cluster.
+- **`integration`:** Compose-backed checks such as
+  `tests/integration/cluster_test.go`. Never required by `go test ./...`.
+- **`chaos`:** destructive multi-node failure, partition, restart, and repair
+  scenarios.
+- **`bench`:** benchmark harness and fixtures added by task 13.
+
+Rule: `go test ./...` must pass with no Docker Compose deployment running.
+
+## Shared harness
+
+`tests/support` owns every reusable double and harness:
+
+| File | Purpose |
+| --- | --- |
+| `store.go` | in-memory `storage.Store` with metadata, fragment, config, and stats methods |
+| `cluster.go` | five-node Raft + SQLite + bufconn deployment; stop/start, traffic drops, auth |
+| `cluster_helpers.go` | leader wait, raw apply, Get helpers |
+| `listener.go` | controllable bufconn listener close/reopen |
+| `dialer.go` | registry-backed fake gRPC dialer with optional token |
+| `probe.go` | controllable health prober for detector tests |
+| `clock.go` | manually advanced clock for detector and orphan tests |
+| `fixtures.go` | deterministic seed, keys, and values |
+
+`StartCluster` uses one `raft.NewInmemTransport` per node connected as a mesh,
+one temp SQLite file per node, and the production gRPC handlers on `bufconn`.
+Cleanup closes gRPC, Raft, SQLite, connections, and listeners. `WaitFor`
+converges on observable state without a fixed sleep. `StopNode` closes a node's
+gRPC/Raft/SQLite but keeps its data; `StartNode` reopens the same directory.
+`SetUnreachable`, `Partition`, and `DropTraffic` inject transport failures
+without stopping Raft.
+
+`StartClusterWithOptions(ClusterOptions{AuthToken: token})` installs the
+production bearer-token interceptors and attaches the token to harness clients.
+`DialRaw` and `DialerWithToken` exercise missing and wrong credentials.
+
+## Coverage map
+
+| Area | Primary tests |
+| --- | --- |
+| Config and gateway config parsing | `tests/unit/config` |
+| SQLite schema, repository, snapshots, sentinel errors | `tests/unit/storage`, `internal/storage/sqlite_test.go` |
+| RS(3,2), replication, placement, storage math | `tests/unit/redundancy` |
+| Metadata command validation and JSON guards | `tests/unit/consensus`, `internal/consensus/command_test.go` |
+| FSM apply, idempotency, snapshots | `internal/consensus/fsm_test.go`, `snapshot_test.go` |
+| Raft election, failover, log replay, SQLite snapshot | `internal/consensus/raft_test.go` |
+| Detector hysteresis and fake clock | `tests/unit/cluster` |
+| Queue priorities, dedupe, overflow, retries | `tests/unit/cluster` |
+| Orphan grace period and guards | `tests/unit/cluster`, chaos |
+| Repair and rebalance | `internal/cluster/repairer_test.go`, integration, chaos |
+| Auth interceptors, health exemption, token propagation | `tests/unit/server`, `tests/unit/rpc`, `tests/integration/auth_test.go` |
+| Fragment stream, stat, list, delete | `tests/integration/fragments_test.go`, `internal/server/fragments_test.go` |
+| Write path, degraded writes, GC | `tests/integration/write_path_test.go` |
+| Read path, fallback, read repair | `tests/integration/read_path_test.go` |
+| Config/status/delete/stats/health | `tests/integration/admin_test.go` |
+| Gateway CLI, routing, retry, token | `tests/unit/gateway`, `tests/integration/gateway_test.go` |
+| Persistence, snapshot restore, repair | `tests/integration/persistence_test.go` |
+| Concurrent clients | `tests/integration/concurrent_test.go` |
+| Failure, partition, restart | `tests/chaos` |
+| Compose cluster | `tests/integration/cluster_test.go` |
+
+## Unit and in-process integration
 
 ```powershell
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race ./internal/storage ./tests/unit/storage
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race ./internal/storage -run TestSQLiteReopenPersistence -v
+# Everything fast, race detector on
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -count=1 ./...
+
+# One package, verbose
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./tests/unit/cluster
+
+# One test
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -run TestDetectorHysteresisWithFakeClock ./tests/unit/cluster
+```
+
+The SQLite-backed suites use `t.TempDir()`; they never touch `/data`:
+
+```powershell
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race ./tests/unit/storage ./internal/storage
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race ./internal/consensus -run TestRaftSQLiteSnapshotRestore -v
 ```
 
-The repository tests open the real schema, so the in-memory test double in
-`tests/support` cannot drift from the production tables. The Raft snapshot test
-forces a snapshot, discards the SQLite file, and proves the FSM restores the
-legacy KV state into a fresh database.
+### How the in-process cluster works
 
-### How the in-process gRPC tests work
+`tests/support.StartCluster` builds:
 
-`internal/server/server_test.go` builds a real five-node Raft cluster with
-`raft.NewInmemTransport`, then puts a gRPC server in front of each node on a
-`bufconn` listener. Each node is constructed with an injected dial function:
+1. five meshed in-memory Raft transports;
+2. five real SQLite stores under `t.TempDir()`;
+3. five gRPC servers on `bufconn` listeners with the production handlers;
+4. an injected dial function mapping node IDs to current listeners.
 
-```go
-srv := server.New(cfg, store, node, dial) // dial resolves "node2" to its bufconn listener
-```
+`StopNode` closes the listener and Raft instance but keeps SQLite and the Raft
+log on disk. `StartNode` reopens them. `SetUnreachable` drops cached dials so a
+connection opened before an injected failure cannot bypass it.
 
-That injection is the reason `internal/server/forward.go` takes a `dialFunc` rather than calling
-`grpc.Dial` directly: forwarding is exercised without opening sockets, and the
-tests stay fast and deterministic.
+Auth tests start the same harness with a token and use raw dials to prove the
+missing/wrong-token and health-exemption paths.
 
-Useful helpers in that file:
+### Read-path and repair tests
 
-| Helper | Purpose |
-| --- | --- |
-| `newTestCluster(t, n)` | Starts `n` meshed Raft nodes with gRPC front ends; registers cleanup |
-| `waitLeader` / `waitFollower` | Wait for a stable role |
-| `mustPut` | Asserts a successful write |
-| `waitForValue` | Polls every node until all return the expected value |
-| `ctxWithTimeout` | Context helper with `t.Helper()` |
-
-The consensus tests have their own `newTestCluster`, `applyCommand`, and
-`waitForValue` helpers in `internal/consensus/raft_test.go`.
-
-### Read path tests
-
-`internal/server/read_test.go` seeds committed metadata and local fragments in a
-`testStore`, so it exercises gather/decode/verify without a live cluster. The
-read-repair cases start a real in-process `cluster.WorkQueue` and poll the store
-until the intended fragment is restored. A full repair queue must still produce
-a successful read with `repaired=false`.
-
-```powershell
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./internal/server -run 'TestRead'
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./internal/cluster
-```
-
-`tests/integration/read_path_test.go` uses the same five-node SQLite+Raft harness
-as the write tests. `SetUnreachable` drops cached gRPC connections, so a
-previously dialed owner cannot bypass the simulated partition. The repair test
-corrupts a fragment through the store API, marks the stripe degraded with
-`set_meta_status`, reads through the leader, and waits for the repair worker to
-restore the intended checksum.
-
-```powershell
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -count=1 -v ./tests/integration
-```
-
-### Admin API tests
-
-`internal/server/admin_test.go` exercises the config, delete, stats, and health
-handlers against the in-process five-node cluster. Leader forwarding, mode
-precedence, delete ordering, and degraded health reporting are all component
-tests; `tests/integration/admin_test.go` repeats the important paths against real
-SQLite stores and a restarted node.
-
-```powershell
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./internal/server -run 'TestServerConfig|TestServerDelete|TestServerStats|TestCheckAuth'
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -count=1 -v ./tests/integration -run 'TestConfig|TestDelete|TestStats|TestHealth'
-```
+`tests/integration/read_path_test.go` seeds real stripes, makes two owners
+unreachable, corrupts a shard with a matching local checksum, and waits for read
+repair to restore the committed shard. `internal/server/read_test.go` exercises
+gather/decode/verify and queue saturation with a fake apply seam.
 
 ### Fragment transport tests
 
-`internal/server/fragments_test.go` starts only the gRPC front end on a
-`bufconn` listener, so fragment tests need neither Raft nor a SQLite file. The
-`uploadFragment` and `downloadChunks` helpers speak the v2 protocol, and
-`config.Config` fields set the size, chunk, and timeout limits per test:
+`tests/integration/fragments_test.go` drives the real streaming API:
+multi-chunk upload, download reassembly, stat, list, checksum rejection, delete,
+and per-stripe deletion. `internal/server/fragments_test.go` covers the lower
+level state machine: gaps, overlap, duplicate offsets, idempotent retry,
+`AlreadyExists` versus replace, size limits, cancellation, and concurrency.
 
-```powershell
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -v ./internal/server -run 'TestUpload|TestDownload|TestDelete|TestList|TestStat'
-```
-
-The suite covers multi-chunk reassembly, gap/overlap/duplicate offsets,
-mid-stream field changes, checksum and size failures, idempotent retries,
-`AlreadyExists` versus `replace`, empty fragments, parity validation,
-concurrent uploads, gRPC message-size rejection, and context timeouts.
-
-### Adding a unit test
-
-1. Prefer a black-box test under `tests/unit/<package>` when the exported API is
-   enough.
-2. If the test genuinely needs unexported internals, keep it next to the code
-   (`internal/storage/foo_test.go`, etc.) and add it to the white-box table in
-   [tests/README.md](../tests/README.md).
-3. Prefer table-driven cases for validation logic.
-4. Use `t.TempDir()` for any data directory so BoltDB files never leak between
-   tests.
-5. If you start a Raft node, always `defer node.Close()` (or use the cluster
-   helper). `Close` shuts Raft down **and** releases the BoltDB file lock;
-   skipping it makes the next `StartRaft` on the same directory block.
-6. Run with `-race`; the suite is designed to be race-clean.
-
-## Integration tests
-
-They exercise the real Compose deployment over the Docker network, so the node
-names (`node1`, …) must resolve.
+## Compose-backed integration
 
 ```powershell
 ./scripts/test.ps1 -Integration
@@ -215,103 +182,95 @@ Raw equivalent:
 
 ```powershell
 docker compose up -d --build
-docker compose ps                      # wait for all five to be healthy
+docker compose ps                      # five healthy nodes
 
 docker run --rm --network distributed-systems_cluster-net -e AUTH_TOKEN `
   -v ${PWD}:/app -w /app golang:1.22 `
-  go test -tags=integration -v -count=1 ./tests/...
+  go test -tags=integration -v -count=1 ./tests/integration/...
 ```
 
 Prerequisites:
 
-- All five containers healthy (`/app/healthcheck` calls `grpc.health.v1`).
-- Exactly one leader; the tests fail fast if the cluster cannot agree.
-- Run from the repository root so the volume mount path is correct.
-- The network name is pinned to `distributed-systems_cluster-net` by the
-  Compose `name:` field and explicit network `name:`; do not discover it
-  dynamically.
-- When `AUTH_TOKEN` is set, the test container must receive the same value. The
-  script passes it automatically; the raw command above uses `-e AUTH_TOKEN`.
+- all five containers healthy (the healthcheck calls `grpc.health.v1`);
+- exactly one leader; tests fail fast if the cluster cannot agree;
+- run from the repository root so the volume mount is correct;
+- the network name is pinned to `distributed-systems_cluster-net`;
+- when `AUTH_TOKEN` is set, the test container receives the same value.
 
-What the tests assert:
+The Compose file covers heartbeat, leader agreement, and write-through-follower.
+`GATEWAY_NODES` can point the same tests at a renamed project or host mapping.
 
-1. **Heartbeat** – every node answers.
-2. **Leader agreement** – all five report the same `leader_id`, exactly one is
-   in state `Leader`, and the term is non-zero.
-3. **Write via follower** – a write sent to a non-leader succeeds (proving
-   forwarding) and returns a stripe ID and version. Reads through a follower
-   exercise forwarding in the other direction.
-
-## Chaos tests
-
-The chaos suite runs an in-process five-node cluster with real Raft transports,
-real SQLite stores, controllable gRPC listeners, a leader-gated detector, and
-the production repairer. It is compiled with the `chaos` build tag.
+## Chaos suite
 
 ```powershell
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -tags=chaos -count=1 ./tests/chaos
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 `
+  go test -race -tags=chaos -count=1 ./tests/chaos/...
 ```
 
-Coverage:
+The suite runs in-process, not against Compose, and uses short detector
+intervals plus `WaitFor` state convergence. It covers:
 
 - one and two unreachable nodes while reads and writes continue;
-- losing quorum when the leader and two followers stop;
+- a degraded write with two owners missing, then repair to five shards;
+- losing quorum with three nodes stopped, with explicit failures;
+- leader kill and re-election, then old-leader rejoin;
+- full and one-way partitions, health degradation, and recovery;
 - node stop/restart with missing fragments and automatic refill;
-- corrupt-shard replacement through the forced `Repair` RPC;
-- a partition that degrades health and recovers after repair;
-- metadata-only fragment loss repaired back to five placements.
+- corrupt-shard replacement through forced `Repair`;
+- metadata-only restore followed by repair;
+- orphan grace period on a real SQLite store.
 
-The suite uses short detector intervals (`100ms`) and failure thresholds (`1`) so
-it finishes in seconds; production defaults are much less aggressive.
+No fixed sleeps are used for synchronization; polling helpers and `WaitFor`
+replace them. Deterministic payloads use `support.DefaultSeed`.
+
+## Determinism rules
+
+1. Seed randomized data from `support.DefaultSeed` and log the seed on failure.
+2. Poll for state (`WaitFor`) instead of sleeping.
+3. Use `support.FakeClock` for detector and orphan timestamps.
+4. Close every node, store, queue, detector, listener, and connection in
+   `t.Cleanup`.
+5. Use unique keys for tests that mutate the live Compose cluster.
+6. Run with `-race`; the suite is race-clean.
+
+## Adding a unit test
+
+1. Prefer `tests/unit/<package>` and exported constructors.
+2. If the test needs unexported internals, keep it next to the code and add it
+   to the exception table in [tests/README.md](../tests/README.md).
+3. Do not export internals just to relocate a test.
+4. Use `t.TempDir()` for any data directory.
+5. Always close Raft nodes and SQLite stores so BoltDB and WAL locks are
+   released.
+6. Prefer table-driven validation cases.
 
 ## Manual verification checklist
 
-The checks below cover behaviour the automated tests cannot easily express
-(killing containers, restarting nodes, preserving volumes):
+Automated tests do not cover every operator workflow. Before a demo:
 
 ```powershell
-# one leader, five healthy nodes
 ./scripts/up.ps1
-./scripts/up.ps1 -Help
-
-# full demo: RS/replication storage comparison, two-node failure, repair, delete
 ./scripts/demo.ps1
 ./scripts/demo.ps1 -Mode replication -SkipFailure
 
-# quorum with two nodes down
 docker compose stop node4 node5
 docker compose run --rm gateway status
 docker compose run --rm gateway get demo-key
 docker compose start node4 node5
 
-# leader restart, then full restart with data retention
 docker compose restart node1
 ./scripts/down.ps1            # keeps volumes
 ./scripts/up.ps1
-
-# confirm SQLite is created and survives a restart
-docker compose exec node1 ls -l /data
-docker compose restart node1
-docker compose exec node1 ls -l /data
-
-# destructive reset (explicit)
-./scripts/reset.ps1
+./scripts/reset.ps1           # destructive
 ```
 
-After the final `up`, use `NodeStatus` (or the integration tests) to confirm the
-cluster elects a leader and still serves previously written keys.
+After `up`, confirm one leader, five healthy nodes, and that previously written
+keys survive the restart.
 
-The bench runner is a placeholder until the benchmark task:
+## Regenerating protobuf code
 
-```powershell
-./scripts/bench.ps1
-./scripts/bench.ps1 --help
-```
-
-## Regenerating the protobuf code
-
-The generated files are committed and pinned to a specific toolchain
-(`protoc` v24.4, `protoc-gen-go` v1.33.0, `protoc-gen-go-grpc` v1.3.0):
+Generated files are committed and pinned to `protoc` v24.4,
+`protoc-gen-go` v1.33.0, and `protoc-gen-go-grpc` v1.3.0:
 
 ```powershell
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 bash -c '
@@ -324,17 +283,25 @@ docker run --rm -v ${PWD}:/app -w /app golang:1.22 bash -c '
     --go-grpc_out=. --go-grpc_opt=paths=source_relative proto/storage.proto'
 ```
 
-Do not hand-edit `proto/storage.pb.go` or `proto/storage_grpc.pb.go`. Keep proto
-changes additive so the gateway and storage tracks keep compiling.
+Do not hand-edit `proto/storage.pb.go` or `proto/storage_grpc.pb.go`; keep proto
+changes additive.
 
-## Notes and known costs
+## CI
 
-- `TestRaftLeaderFailover` takes about 5 s because it waits for a real election.
-- `TestRaftPersistenceCatchUp`, `TestRaftSnapshotRestore`, and
-  `TestRaftSQLiteSnapshotRestore` run in a few seconds; if any hangs, a previous
-  test failed to call `node.Close()` and is still holding the BoltDB lock.
-- The race detector roughly doubles the runtime of the consensus suite.
-- SQLite tests use `t.TempDir()` for every database, so `node.db` and its WAL
-  files never leak between runs.
-- The integration suite mutates the live cluster with unique keys
-  (`integration-<unix-nano>`), so repeated runs do not collide.
+`.github/workflows/ci.yml` installs Go 1.22 and `gcc`, then runs build, all three
+vet tag sets, the fast race suite, and a `gofmt` check. CI does not start
+Compose. CGO is required for `mattn/go-sqlite3`; do not disable it.
+
+## Known costs and troubleshooting
+
+- `TestRaftLeaderFailover` takes about 5 seconds because it waits for a real
+  election.
+- The race detector roughly doubles the runtime of the consensus and
+  integration suites.
+- If a test hangs with `create bolt store: timeout`, a previous Raft node was
+  not closed and still holds `raft.db`.
+- `database is locked` means a SQLite store was not closed before restart.
+- `node1` failing to resolve means the test was not run on
+  `distributed-systems_cluster-net`.
+- `gcc not found` means the container lacks build tools; keep CGO enabled.
+- A failed `gofmt -l .` output must be fixed with `gofmt -w`.
