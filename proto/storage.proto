@@ -40,6 +40,25 @@ service StorageService {
   // Repair is the entry point for the failure-management subsystem to ask a
   // node to rebuild a missing fragment.
   rpc Repair (RepairRequest) returns (RepairResponse);
+
+  // Delete removes a key's committed metadata and then garbage-collects the
+  // stripe's fragments on their owners. It is idempotent.
+  rpc Delete (DeleteRequest) returns (DeleteResponse);
+
+  // GetConfig returns the cluster-wide default redundancy mode. The leader
+  // serves a linearizable read through Raft; followers forward.
+  rpc GetConfig (GetConfigRequest) returns (ConfigResponse);
+
+  // SetConfig replaces the cluster-wide default redundancy mode through Raft.
+  // Only the leader commits; followers forward.
+  rpc SetConfig (SetConfigRequest) returns (ConfigResponse);
+
+  // ClusterHealth reports the leader, global mode, node health, and degraded
+  // state. Followers forward because only the leader has a complete view.
+  rpc ClusterHealth (ClusterHealthRequest) returns (ClusterHealthResponse);
+
+  // Stats reports local storage and repair counters. Any node may answer.
+  rpc Stats (StatsRequest) returns (StatsResponse);
 }
 
 message PutRequest {
@@ -191,4 +210,80 @@ message RepairRequest {
 message RepairResponse {
   bool success = 1;
   string message = 2;
+}
+
+message GetConfigRequest {}
+
+message ConfigResponse {
+  // default_mode is the cluster-wide mode used when a Put omits a mode.
+  string default_mode = 1;
+  bool success = 2;
+  string message = 3;
+  // leader_id identifies the node that committed or read the config.
+  string leader_id = 4;
+}
+
+message SetConfigRequest {
+  // default_mode must be "rs32" or "replication"; empty is rejected.
+  string default_mode = 1;
+}
+
+message DeleteRequest {
+  string key = 1;
+  // Optional compare-and-delete guard. Zero means unconditional; a non-zero
+  // value must equal the stored version or the delete fails with Aborted.
+  int64 expected_version = 2;
+}
+
+message DeleteResponse {
+  bool success = 1;
+  string message = 2;
+  // old_stripe_id names the stripe whose fragments were garbage-collected.
+  string old_stripe_id = 3;
+  // found is false when the key was already absent. Delete is idempotent.
+  bool found = 4;
+}
+
+message StatsRequest {}
+
+message StatsResponse {
+  string node_id = 1;
+  string mode = 2;
+  bool leader = 3;
+  uint64 keys = 4;
+  uint64 stripes = 5;
+  uint64 fragments = 6;
+  uint64 storage_bytes = 7;
+  uint64 repair_queue_depth = 8;
+  uint64 repairs_completed = 9;
+  uint64 repairs_failed = 10;
+  int64 uptime_seconds = 11;
+}
+
+message ClusterHealthRequest {}
+
+message NodeHealth {
+  string node_id = 1;
+  string grpc_addr = 2;
+  string raft_state = 3;
+  bool healthy = 4;
+  bool leader = 5;
+  int64 last_seen_unix = 6;
+  uint64 fragments = 7;
+  uint64 storage_bytes = 8;
+  string error = 9;
+}
+
+message ClusterHealthResponse {
+  bool success = 1;
+  string leader_id = 2;
+  string mode = 3;
+  // degraded is true when any node is unhealthy or any stripe is degraded.
+  bool degraded = 4;
+  uint32 healthy_nodes = 5;
+  uint32 total_nodes = 6;
+  repeated NodeHealth nodes = 7;
+  uint64 degraded_stripes = 8;
+  uint64 repair_queue_depth = 9;
+  string message = 10;
 }
