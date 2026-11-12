@@ -45,7 +45,9 @@ func TestQueueRunsByPriority(t *testing.T) {
 		mu    sync.Mutex
 		order []Priority
 	)
-	q := NewQueue(QueueOptions{Workers: 2, Capacity: 8, Jitter: func(d time.Duration) time.Duration { return d }},
+	// One worker is required for a strict global order: with multiple workers,
+	// two tasks can be popped in priority order but finish in either order.
+	q := NewQueue(QueueOptions{Workers: 1, Capacity: 8, Jitter: func(d time.Duration) time.Duration { return d }},
 		func(_ context.Context, task Task) error {
 			mu.Lock()
 			order = append(order, task.Priority)
