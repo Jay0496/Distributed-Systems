@@ -1,13 +1,15 @@
 # Gateway & CLI
 
-The CLI client (`put <key> <val>`, `get <key>`, and redundancy mode toggles) and
-the consistent-hash routing gateway. The command lives in `cmd/gateway`; the hash
-ring lives in `internal/gateway`.
+The gateway moved to `cmd/gateway` (process wiring) and `internal/gateway`
+(consistent-hash entry ring, retrying client, CLI commands, and rendering).
 
-### How to run your code without installing Go
-
-From the repository root:
+Usage, environment variables, retry behavior, and authentication are documented
+in the root [README.md](../README.md#gateway-cli) and
+[docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md#gateway-and-retries). Security
+notes live in [docs/SECURITY.md](../docs/SECURITY.md).
 
 ```powershell
-docker run --rm -it -v "${PWD}:/app" -w /app golang:1.22 go run ./cmd/gateway put test-key test-val
+docker compose run --rm gateway put demo-key "hello" --mode rs32
+docker compose run --rm gateway get demo-key
+docker compose run --rm gateway status
 ```

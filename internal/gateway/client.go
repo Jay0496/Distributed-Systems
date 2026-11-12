@@ -51,6 +51,12 @@ func NewClient(cfg config.GatewayConfig) (*Client, error) {
 	return newClientWithDialer(cfg, dial), nil
 }
 
+// NewClientWithDialer builds a Client with a custom transport. It is used by
+// in-process integration tests; production code calls NewClient.
+func NewClientWithDialer(cfg config.GatewayConfig, dial DialFunc) *Client {
+	return newClientWithDialer(cfg, dial)
+}
+
 // newClientWithDialer is the test seam for NewClient.
 func newClientWithDialer(cfg config.GatewayConfig, dial DialFunc) *Client {
 	cfg = normalizeClientConfig(cfg)

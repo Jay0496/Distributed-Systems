@@ -66,7 +66,7 @@ internal/server      gRPC handlers, forwarding, fragment transport
 internal/consensus   Raft node, FSM, metadata commands
 internal/storage     Store interface, SQLite metadata/fragment/config repositories
 internal/redundancy  RS(3,2), five-copy replication, checksums, deterministic placement
-internal/gateway     consistent-hash router
+internal/gateway     consistent-hash entry ring, retrying client, CLI commands, rendering
 internal/cluster     failure detector, prioritized repair queue, repairer, orphan sweep
 
 proto/               storage.proto and committed generated code
@@ -436,7 +436,7 @@ available without restarting nodes.
 | `GetConfig` | Leader (followers forward) | Applies `get_config` through Raft, so the returned mode observes all committed configuration changes. The FSM returns `rs32` when no config row exists. |
 | `SetConfig` | Leader (followers forward) | Validates `default_mode` (`rs32` or `replication`; empty is rejected), commits `set_config`, and waits for the apply. Configuration lives in SQLite and in the Raft snapshot. |
 | `Delete` | Leader (followers forward) | Commits `delete_meta` with the optional expected version atomically, then deletes the stripe's fragments on every owner from the returned `Placement`. Metadata always commits first. A missing key returns `success=true, found=false`; a version mismatch returns `Aborted`. |
-| `Stats` | Any node, local only | Reports `node_id`, mode, leader flag, keys, stripes, fragments, SQLite+WAL+SHM bytes, repair counters, and uptime. Repair counters and depth are zero until task 09 supplies the shared repair queue. |
+| `Stats` | Any node, local only | Reports `node_id`, mode, leader flag, keys, stripes, fragments, SQLite+WAL+SHM bytes, repair counters, and uptime. |
 | `ClusterHealth` | Leader (followers forward) | Lists the Raft voters, probes each one in parallel with `NodeStatus` and `Stats`, and aggregates the result. |
 
 **Config precedence.** A write uses the request's non-empty `mode`, otherwise
@@ -457,14 +457,51 @@ probes when the RPC arrives, uses `CLUSTER_PROBE_TIMEOUT` (default `1s`) per
 node, and never blocks writes. Task 09 replaces the probe cadence with a cached
 background detector, at which point this handler reads the cache instead.
 
-**Authorization seam.** `internal/server.Authorizer` is the hook for task 10. An
-allow-all implementation is installed only while `AUTH_TOKEN` is empty. If
-`AUTH_TOKEN` is set and no authorizer is configured, process startup fails
-instead of silently admitting unauthenticated requests. Internal clients dial
-through `internal/rpc.DialOptions`, which attaches
+**Authorization.** `AUTH_TOKEN` is enforced by unary and stream interceptors
+installed in `cmd/server`. They require `authorization: Bearer <token>`, compare
+tokens with `crypto/subtle.ConstantTimeCompare`, and exempt only
+`/grpc.health.v1.Health/Check` and `/grpc.health.v1.Health/Watch`. If
+`AUTH_TOKEN` is set, `Server.CheckAuth` refuses to start unless the process
+installed the interceptors; if it is empty, startup logs a warning. Internal
+clients dial through `internal/rpc.DialOptions`, which attaches
 `authorization: Bearer <token>` to unary and streaming calls and raises the gRPC
 message limit to `MAX_MESSAGE_SIZE`; `rpc.AppendAuth` provides the same header
 for one-off calls.
+
+## Gateway and retries
+
+`cmd/gateway` wires `GATEWAY_NODES`, `GATEWAY_VNODES`, `GATEWAY_TIMEOUT`,
+`GATEWAY_RETRIES`, `AUTH_TOKEN`, and `MAX_MESSAGE_SIZE` into
+`internal/gateway.Client`. There is no localhost fallback: an unset
+`GATEWAY_NODES` is a startup error that names the variable and shows an example.
+
+The ring chooses an **entry node**, not a shard owner. The entry node forwards
+the RPC to the Raft leader; the leader reads metadata and coordinates the five
+shard owners. Consistent hashing spreads client connections and gives the retry
+loop a deterministic candidate order, but it does not change data placement.
+
+`Router.Candidates` returns the entry node, ring successors, then remaining
+nodes, de-duplicated. One command makes at most `1 + GATEWAY_RETRIES` attempts,
+cycling that order with a per-attempt `GATEWAY_TIMEOUT` deadline. Each attempt
+uses a fresh connection so a stale connection cannot hide a node that just
+changed state.
+
+| Response | Behaviour |
+| --- | --- |
+| Success | Return the response and the node that served it. |
+| `Unavailable`, `DeadlineExceeded` | Record the node and error, back off, try the next candidate. |
+| `Aborted` | For a write with `--version`, return the conflict. Otherwise read `NodeStatus`, move the reported leader to the front, reset the cycle, and retry. |
+| `InvalidArgument`, `NotFound`, `PermissionDenied`, `Unauthenticated`, `AlreadyExists`, `FailedPrecondition`, `ResourceExhausted` | Return immediately; retrying cannot help. |
+| Other statuses | Record, back off, and retry. |
+
+Backoff uses 100 ms, 250 ms, and 500 ms steps with ±20% jitter. If every attempt
+fails, the error lists each attempted node and its error. `--json` is available
+on every command; `health` exits non-zero unless every voter is healthy, a leader
+is known, and no committed stripe is degraded.
+
+`put` is last-write-wins unless `--version` supplies an expected version;
+`delete` is idempotent. A retried write creates a new version or conflicts, so the
+retry cannot silently apply a different user intent. Tokens are never printed.
 
 ## Fragment transport v2
 
