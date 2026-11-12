@@ -5,27 +5,60 @@ package tests
 import (
 	"context"
 	"fmt"
+	"os"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
+	"distributed-kv-store/internal/config"
+	"distributed-kv-store/internal/rpc"
 	pb "distributed-kv-store/proto"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// clusterNodes are the gRPC endpoints published by docker-compose.yml. Run the
-// integration tests inside the compose network so these names resolve:
+// defaultClusterNodes are the gRPC endpoints published by docker-compose.yml.
+// GATEWAY_NODES may override them with the same id=host:port form the gateway
+// uses. Run the integration tests inside the compose network so these names
+// resolve:
 //
 //	docker run --rm --network distributed-systems_cluster-net \
 //	  -v ${PWD}:/app -w /app golang:1.22 \
 //	  go test -tags=integration ./tests/...
-var clusterNodes = []string{
+var defaultClusterNodes = []string{
 	"node1:50051",
 	"node2:50052",
 	"node3:50053",
 	"node4:50054",
 	"node5:50055",
+}
+
+// clusterNodeAddrs reads GATEWAY_NODES when set and otherwise keeps the Compose
+// defaults. The override lets the same suite run against a renamed project or a
+// different host port mapping.
+func clusterNodeAddrs() []string {
+	raw := strings.TrimSpace(os.Getenv("GATEWAY_NODES"))
+	if raw == "" {
+		return defaultClusterNodes
+	}
+
+	nodes := config.ParsePeerMap(raw)
+	if len(nodes) == 0 {
+		return defaultClusterNodes
+	}
+	ids := make([]string, 0, len(nodes))
+	for id := range nodes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	addrs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		addrs = append(addrs, nodes[id])
+	}
+	return addrs
 }
 
 type clusterClient struct {
@@ -34,17 +67,25 @@ type clusterClient struct {
 	client pb.StorageServiceClient
 }
 
-// dialCluster connects to every node in the compose cluster.
+// dialCluster connects to every node in the compose cluster. The shared rpc
+// helper attaches AUTH_TOKEN when auth is enabled and raises the message limit.
 func dialCluster(t *testing.T) []clusterClient {
 	t.Helper()
 
-	clients := make([]clusterClient, 0, len(clusterNodes))
-	for _, addr := range clusterNodes {
+	addrs := clusterNodeAddrs()
+	opts, err := rpc.DialOptions(rpc.TokenFromEnv(), config.DefaultMaxMessageSize)
+	if err != nil {
+		t.Fatalf("build dial options: %v", err)
+	}
+	opts = append(opts,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
+
+	clients := make([]clusterClient, 0, len(addrs))
+	for _, addr := range addrs {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		conn, err := grpc.DialContext(ctx, addr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithBlock(),
-		)
+		conn, err := grpc.DialContext(ctx, addr, opts...)
 		cancel()
 		if err != nil {
 			t.Fatalf("dial %s: %v (is `docker compose up -d` running?)", addr, err)
