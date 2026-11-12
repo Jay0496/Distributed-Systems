@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"strings"
 
 	"distributed-kv-store/internal/storage"
@@ -476,16 +475,4 @@ func fragmentInfo(ref storage.FragmentRef) *pb.FragmentInfo {
 	}
 }
 
-// Repair is the entry point for the failure-management subsystem. It is a
-// deliberate scaffold: reconstruction and rebalancing land with that subsystem.
-func (s *Server) Repair(ctx context.Context, req *pb.RepairRequest) (*pb.RepairResponse, error) {
-	if strings.TrimSpace(req.GetKey()) == "" {
-		return &pb.RepairResponse{Success: false, Message: "key is required"}, nil
-	}
-
-	log.Printf("repair requested for key %q (reconstruction not yet implemented)", req.GetKey())
-	return &pb.RepairResponse{
-		Success: true,
-		Message: "repair request accepted; reconstruction is provided by the failure-management subsystem",
-	}, nil
-}
+// Repair is implemented in repair.go.

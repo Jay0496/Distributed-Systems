@@ -11,7 +11,8 @@
 | ADR-007 | Keep Raft metadata-only and move fragments out of band | Accepted |
 | ADR-008 | Write fragments before metadata and require a three-shard quorum | Accepted |
 | ADR-009 | Leader-coordinated verified reads with asynchronous read repair | Accepted |
-| ADR-010 | On-demand cluster health probing until a cached detector exists | Accepted |
+| ADR-010 | On-demand cluster health probing until a cached detector exists | Superseded by ADR-011 |
+| ADR-011 | Leader-owned detection and fixed-membership repair | Accepted |
 
 ---
 
@@ -728,3 +729,83 @@ shape stays the same and the handler will read the cache instead of probing.
   picture, and Raft state alone cannot report fragment counts or degraded keys.
 - **Exempt `NodeStatus` and `Stats` from auth.** Rejected: it creates an
   unauthenticated observability surface and diverges from the task 10 model.
+
+---
+
+## ADR-011: Leader-owned detection and fixed-membership repair
+
+**Date:** 2026-11-12
+**Status:** Accepted
+**Supersedes:** ADR-010
+
+### Context
+
+The cluster must detect failures, report degraded mode, repair missing shards,
+refill returning nodes, and remove orphan fragments without adding dynamic
+membership or per-shard Raft groups. Reads and writes already tolerate two
+failures after a healthy write through the three-node Raft quorum and RS(3,2) or
+five-copy replication. Degraded writes need an automated path back to five
+shards.
+
+### Decision
+
+- One leader-gated `cluster.Detector` probes peers with hysteresis and emits
+  node-up, node-down, leader-gained, and leader-lost events. Followers never
+  probe.
+- One leader-gated `cluster.Repairer` consumes a shared bounded queue for read
+  repair, degraded stripes, returning nodes, and explicit `Repair` RPCs.
+  Losing leadership pauses the queue; gaining it rebuilds work from metadata.
+- The local orphan sweep runs on every node because fragments are node-local.
+  It deletes only fragments older than a grace period whose stripe is absent
+  from metadata or whose shard index is placed on another node, and it refreshes
+  metadata before deletion.
+- Placement remains deterministic from the sorted five node IDs. Rebalancing
+  means refilling returning nodes and deleting orphans, not migrating data to a
+  changed node set.
+- Repair state is derived, not journaled. A new leader rebuilds it from
+  committed metadata and the periodic sweep.
+
+### Rationale
+
+- The leader already owns write coordination, read gathering, and degraded
+  reporting; centralizing detection and reconstruction gives one consistent view
+  and avoids N-way probes.
+- Hysteresis plus a sweep interval prevents a single slow probe from causing a
+  repair storm.
+- Deterministic placement makes the intended owner of every shard stable, so
+  repair can safely upload to metadata-named owners without a placement change.
+- Deriving state from metadata avoids a second persistent source of truth and
+  keeps snapshot/restore simple.
+
+### Consequences
+
+**Positive**
+
+- Missing shards are repaired automatically after a restart or a degraded write.
+- Degraded mode clears only when all five placements verify, so the flag cannot
+  be cleared by a single lucky read.
+- Orphan cleanup is local, idempotent, and independent of leadership.
+- Internal probes and repair RPCs reuse `internal/rpc.DialOptions`, so auth and
+  message limits apply uniformly.
+
+**Negative**
+
+- Detection lags by up to `DETECT_FAILURES * DETECT_INTERVAL` (default about 6 s).
+- A repair of a large stripe competes with client traffic; workers and per-owner
+  rate limits bound the impact.
+- Fixed membership means adding a node requires an explicit future migration
+  feature; editing `PEERS` alone would change placement and strand data.
+
+### Alternatives considered
+
+- **Every node probes every peer.** Rejected: N² probe traffic and conflicting
+  views without improving repair correctness.
+- **Per-shard Raft groups.** Rejected: far beyond course scope and unnecessary
+  for five fixed nodes.
+- **Repair from any present fragment without a verified value.** Rejected: a
+  corrupt fragment could be copied over a healthy one. Repair always re-encodes
+  a value verified against committed size and checksum.
+- **Clear degraded during read repair.** Rejected: a single read does not prove
+  all five placements are healthy.
+- **Persist a repair journal.** Rejected: metadata plus a periodic sweep already
+  reconstructs the work, and a journal adds recovery states to test.

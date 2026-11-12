@@ -205,6 +205,11 @@ message FragmentOpResponse {
 
 message RepairRequest {
   string key = 1;
+  // Optional stripe precision. When set it must match the key's current stripe.
+  string stripe_id = 2;
+  // Re-encode and replace even when the target fragment is present. Requires a
+  // verified source value; used for corrupt-shard reports and operator drills.
+  bool force = 3;
 }
 
 message RepairResponse {

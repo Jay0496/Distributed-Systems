@@ -237,11 +237,11 @@ func TestReadInsufficientShards(t *testing.T) {
 // recordingQueue captures tasks instead of running them.
 type recordingQueue struct {
 	mu    sync.Mutex
-	tasks []cluster.RepairTask
+	tasks []cluster.Task
 	err   error
 }
 
-func (q *recordingQueue) Enqueue(task cluster.RepairTask) error {
+func (q *recordingQueue) Enqueue(task cluster.Task) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.err != nil {
@@ -262,8 +262,31 @@ func (q *recordingQueue) len() int {
 func newRepairingServer(t *testing.T, store *testStore) *Server {
 	t.Helper()
 	srv := newReadTestServer(store)
-	srv.repairQueue = cluster.NewRepairQueue(1, 8, 5*time.Second, srv.performReadRepair)
-	t.Cleanup(srv.repairQueue.Close)
+	repairer := cluster.NewRepairer(cluster.RepairerOptions{
+		Store:         store,
+		Reader:        srv,
+		Uploader:      srv,
+		Statter:       srv,
+		MetaStatus:    srv,
+		Nodes:         []string{"node1"},
+		SelfNode:      "node1",
+		SweepInterval: time.Hour,
+		RateLimit:     1000,
+		Logf:          func(string, ...any) {},
+	})
+	queue := cluster.NewQueue(cluster.QueueOptions{
+		Workers:     2,
+		Capacity:    64,
+		Timeout:     5 * time.Second,
+		MaxAttempts: 3,
+	}, repairer.Process)
+	repairer.SetQueue(queue)
+	srv.repairer = repairer
+	srv.repairQueue = queue
+	t.Cleanup(func() {
+		repairer.Stop()
+		queue.Close()
+	})
 	return srv
 }
 
@@ -557,7 +580,12 @@ func TestReadQueueSaturationDoesNotFailRead(t *testing.T) {
 	block := make(chan struct{})
 	started := make(chan struct{})
 	var startedOnce sync.Once
-	queue := cluster.NewRepairQueue(1, 1, time.Minute, func(context.Context, cluster.RepairTask) error {
+	queue := cluster.NewQueue(cluster.QueueOptions{
+		Workers:     1,
+		Capacity:    1,
+		Timeout:     time.Minute,
+		MaxAttempts: 1,
+	}, func(context.Context, cluster.Task) error {
 		startedOnce.Do(func() { close(started) })
 		<-block
 		return nil
@@ -568,11 +596,11 @@ func TestReadQueueSaturationDoesNotFailRead(t *testing.T) {
 		queue.Close()
 	}()
 
-	if err := queue.Enqueue(cluster.RepairTask{Key: "first"}); err != nil {
+	if err := queue.Enqueue(cluster.Task{Key: "first", StripeID: "first", ShardIndex: 0}); err != nil {
 		t.Fatalf("prefill queue: %v", err)
 	}
 	<-started
-	if err := queue.Enqueue(cluster.RepairTask{Key: "second"}); err != nil {
+	if err := queue.Enqueue(cluster.Task{Key: "second", StripeID: "second", ShardIndex: 0}); err != nil {
 		t.Fatalf("fill queue: %v", err)
 	}
 

@@ -907,27 +907,6 @@ func TestDownloadHonorsFragmentTimeout(t *testing.T) {
 	requireCode(t, err, codes.DeadlineExceeded)
 }
 
-func TestRepairScaffold(t *testing.T) {
-	store := newTestStore()
-	client, _ := newFragmentTestServer(t, config.Config{}, store)
-
-	resp, err := client.Repair(context.Background(), &pb.RepairRequest{Key: "doc"})
-	if err != nil {
-		t.Fatalf("Repair failed: %v", err)
-	}
-	if !resp.GetSuccess() {
-		t.Fatalf("Repair rejected a valid key: %s", resp.GetMessage())
-	}
-
-	badRepair, err := client.Repair(context.Background(), &pb.RepairRequest{Key: "  "})
-	if err != nil {
-		t.Fatalf("Repair(blank) RPC failed: %v", err)
-	}
-	if badRepair.GetSuccess() {
-		t.Fatal("Repair accepted a blank key")
-	}
-}
-
 func TestUploadRejectsOversizedGRPCMessage(t *testing.T) {
 	store := newTestStore()
 	cfg := config.Config{MaxMessageSize: 1024}

@@ -67,7 +67,7 @@ internal/consensus   Raft node, FSM, metadata commands
 internal/storage     Store interface, SQLite metadata/fragment/config repositories
 internal/redundancy  RS(3,2), five-copy replication, checksums, deterministic placement
 internal/gateway     consistent-hash router
-internal/cluster     failure detection and repair (created now, populated later)
+internal/cluster     failure detector, prioritized repair queue, repairer, orphan sweep
 
 proto/               storage.proto and committed generated code
 tests/               support, unit, integration, chaos, and bench suites
@@ -365,20 +365,23 @@ sequenceDiagram
    subset verifies, the read returns `DataLoss` and never exposes unverified
    bytes.
 7. After a successful read, every failed placement is queued for asynchronous
-   read repair. The queue is bounded (`READ_REPAIR_WORKERS`, default 2, with a
-   64-task buffer) and an enqueue failure logs and drops only the repair; the
-   client response is never delayed. `GetResponse.repaired` reports whether the
-   task was accepted.
-8. A repair worker re-reads metadata through Raft and confirms the key still
+   repair in the shared `internal/cluster.Queue`. The queue deduplicates by
+   `(stripe_id, shard_index)`, prioritizes read repair above degraded stripes and
+   returning-node refills, and bounds capacity at 10,000 tasks. An enqueue
+   failure logs and drops only the repair; the client response is never delayed.
+   `GetResponse.repaired` reports whether at least one task was accepted.
+8. A repair worker re-reads the stripe metadata and confirms the key still
    points at the same stripe ID and version. If an overwrite or delete won the
-   race, it drops the task. Otherwise it re-encodes the verified value, verifies
-   the new shard checksums, and uploads missing shards with the ordinary
-   fragment upload. Corrupt copies use `replace=true` so the transport may
-   overwrite a different checksum. It writes only to the owners named by the
-   current placement.
-9. Read repair does **not** clear `metadata.degraded` in this task. Task 09 owns
-   `set_meta_status` and the final all-five-present check, and it replaces the
-   in-process queue with the shared repair queue.
+   race, it drops the task. Otherwise it reads a verified value through
+   `ReadVerified`, re-encodes it, verifies the new shard checksums, and uploads
+   missing shards with the ordinary fragment upload. Corrupt copies use
+   `replace=true` so the transport may overwrite a different checksum. It writes
+   only to the owners named by the current placement.
+9. After a repair, the repairer stats all five intended placements. When every
+   shard matches the re-encoded checksum it clears `metadata.degraded` through a
+   `set_meta_status` command. Repair never changes the stripe ID, user-visible
+   version, or placement. Failed tasks retry with jittered exponential backoff
+   (1s, 2s, 4s, 8s, capped at 30s) up to `REPAIR_MAX_ATTEMPTS` (default 5).
 
 `Server.ReadVerified(ctx, meta)` is the repair-facing wrapper around the same
 gather/decode/verify path. It returns the verified bytes, never enqueues read
@@ -416,12 +419,12 @@ the leader's status unchanged; only `Unavailable` is retried once.
 | `DeleteStripeFragments` | Deletes every local fragment for a stripe (overwrite GC). |
 | `ListFragments` | Streams local fragment metadata, optionally filtered by stripe. |
 | `StatFragment` | Reports fragment size and checksum without a payload. |
-| `Repair` | Validates the key and returns a scaffold message; reconstruction belongs to the failure-management subsystem. |
+| `Repair` | Leader-forwarded on-demand repair. Requires `key`; optional `stripe_id` must match current metadata. Enqueues one task per placement and returns immediately. `force=true` re-encodes and replaces present shards after a verified read. |
 | `Heartbeat` | Legacy liveness RPC. Real health checks use `grpc.health.v1`. |
 | `Delete` | Leader commits `delete_meta`, then garbage-collects the old stripe's fragments. Missing keys are idempotent. |
 | `GetConfig` / `SetConfig` | Leader-forwarded global mode read and write through Raft. |
-| `ClusterHealth` | Leader-forwarded on-demand health and degraded-state snapshot. |
-| `Stats` | Local-only key, stripe, fragment, byte, mode, and uptime counters. |
+| `ClusterHealth` | Leader-forwarded health and degraded-state snapshot. Reads the leader's cached detector map and repair queue depth; falls back to an on-demand probe for nodes the detector has not seen. |
+| `Stats` | Local-only key, stripe, fragment, byte, mode, uptime, repair queue depth, and repair counters. |
 
 ### Admin and configuration API
 
@@ -617,23 +620,112 @@ exactly one fragment on each of the five nodes.
   stale local data through the public API.
 - **Read repair** is best effort and asynchronous. A successful read enqueues
   repair for missing or corrupt placements without delaying the response; the
-  value returned by that read is already fully verified.
+  value returned by that read is already fully verified. Repair clears the
+  degraded flag only after all five intended placements verify.
 - **Catch-up** is “eventually consistent” only for internal replica state while
   it is behind; it converges as soon as the leader replicates to it.
 - **No quorum, no progress**: with fewer than three of five nodes alive, writes
   and reads time out rather than serving stale data.
 
+## Failure detection, repair, and rebalancing
+
+The failure-management subsystem is deliberately leader-owned for reconstruction
+and node-local only for orphan cleanup.
+
+### Detector state machine
+
+```text
+leader gain ──► probe every DETECT_INTERVAL
+                  │
+                  ├── success ──► Successes++; Failures = 0
+                  │                 Successes >= DETECT_SUCCESSES ──► Healthy
+                  │
+                  └── failure ──► Failures++; Successes = 0
+                                    Failures >= DETECT_FAILURES ──► Unhealthy
+leader loss ──► stop probing, pause repair workers, keep the local orphan sweep
+```
+
+- The detector starts optimistic: a node is healthy until it crosses the failure
+  threshold. This makes the first genuine outage produce a real down event.
+- Each probe calls the standard `grpc.health.v1` service and `NodeStatus`. Both
+  must succeed. Probes dial through the shared `internal/rpc` options, so
+  `AUTH_TOKEN` and `MAX_MESSAGE_SIZE` apply when auth is enabled.
+- `DETECT_INTERVAL` defaults to `2s`, `DETECT_TIMEOUT` to `1s`,
+  `DETECT_FAILURES` to `3`, and `DETECT_SUCCESSES` to `1`.
+- Only the leader probes. `Raft.LeaderCh()` drives immediate transitions and a
+  polling fallback prevents a missed channel event from leaving the detector
+  running on a follower.
+- Node up/down events feed the repairer. Losing leadership sets the repairer
+  inactive and pauses the queue; gaining it resumes the queue and immediately
+  sweeps committed metadata for degraded stripes.
+
+### Repairer
+
+The repairer’s unit of work is `(stripe_id, shard_index, owner, replace)`.
+Enqueue sources are:
+
+- a read that could not use a shard (read repair, highest priority),
+- a node that became unhealthy or returned,
+- a stripe whose metadata is marked degraded,
+- an explicit `Repair` RPC,
+- the periodic `REPAIR_SWEEP_INTERVAL` sweep (default `60s`).
+
+Processing is safety-first:
+
+1. Re-read the key metadata. Drop the task if the key no longer points at that
+   stripe ID or version.
+2. Stat the target shard on its intended owner. A present shard is skipped
+   unless the task is marked `replace` (corrupt-shard report or `force`).
+3. Read and verify the value from live peers through `ReadVerified`. This is the
+   ordinary read path with read-repair enqueueing disabled, so a repair cannot
+   recursively enqueue another repair. If fewer than three RS shards or no
+   replication copy survive, the task fails and is retried; the repairer never
+   invents data.
+4. Re-encode the verified value, verify `size` and `checksum` against metadata,
+   and upload only the target shard through `UploadShard`, which reuses the task
+   06 chunking, checksum, timeout, and `replace` rules.
+5. When all five placements hold the expected shard checksum, clear
+   `metadata.degraded` with `set_meta_status`. Never call `put_meta` during
+   repair: a same-version put conflicts and a new version is a user-visible
+   rewrite.
+
+Concurrency is bounded by `REPAIR_WORKERS` (default 2), uploads are rate-limited
+per owner (`REPAIR_RATE_LIMIT`, default 20/s), and retries use jittered
+exponential backoff up to `REPAIR_MAX_ATTEMPTS` (default 5). The queue exposes
+depth, completed, failed, retried, deduplicated, and dropped counters through
+`Stats` and `ClusterHealth`.
+
+### Rebalancing in a fixed cluster
+
+Placement is deterministic from the sorted five node IDs, so the intended owner
+of every shard never changes while membership is fixed. “Rebalancing” therefore
+means two things:
+
+- **Refill returning nodes.** A node-up event enqueues every stripe placed on
+  that node, and the repairer reconstructs the missing shards.
+- **Remove orphans.** Every node runs a local sweep because fragments are
+  node-local. It lists local fragments and deletes one only when it is older
+  than `ORPHAN_GRACE_PERIOD` (default 10 minutes) and either its stripe ID is
+  absent from metadata or its shard index is placed on another node. Metadata is
+  refreshed immediately before deletion, so a write that commits during the pass
+  keeps its fragments. The pass is skipped when the node has no known leader or
+  trails the leader’s commit index by more than `ORPHAN_MAX_INDEX_LAG`.
+
+Adding or removing a node changes the sorted node list and therefore every
+placement. Dynamic membership and automatic data migration for a changed node
+set are future work; do not enable them by editing `PEERS` alone.
+
 ## Failure and recovery
 
 | Scenario | Behaviour |
 | --- | --- |
-| Follower dies | Quorum (3/5) still commits. On restart the follower's BoltDB log replays, then the leader streams the missing entries. |
+| Follower dies | Quorum (3/5) still commits. The leader marks it unhealthy after `DETECT_FAILURES` probes and reports degraded mode. On restart the follower's BoltDB log replays, the leader streams missing entries, and the repairer refills its stripe placements. |
 | One or two RS shards missing/corrupt | A read succeeds from any three valid shards and queues asynchronous repair of the failed placements. |
-| Three RS shards missing or no replication copy survives | The read fails with `FailedPrecondition` and lists the failed owners; it never returns partial data. |
-| Leader dies | Remaining nodes elect a new leader after the election timeout. Followers re-resolve the leader on the next request. |
+| Three RS shards missing or no replication copy survives | The read fails with `FailedPrecondition` and lists the failed owners; it never returns partial data. Repair is retried but cannot invent data from a sub-quorum. |
+| Leader dies | Remaining nodes elect a new leader after the election timeout. The old leader stops probing and repair when it loses leadership; the new leader starts fresh from committed metadata. |
 | Leader restarts | It rejoins as a follower using its persisted log and configuration; a new leader may already exist. |
 | Whole cluster restarts | Each node reopens `raft.db` and `node.db`, restores state, and rejoins the persisted configuration; the leader is re-elected. |
-| Log grows | Raft triggers a snapshot; the FSM serializes the store, and old log entries are truncated. |
+| Log grows | Raft triggers a snapshot; the FSM serializes metadata, and old log entries are truncated. Fragments are not snapshotted; a node restored from a metadata-only snapshot refills its local fragments through repair. |
 | Stale membership | `BOOTSTRAP_SERVERS` is only applied to a node with no state, so live membership changes survive restarts. |
 
 ## Why Raft uses raw TCP instead of gRPC
@@ -654,14 +746,15 @@ in [DECISIONS.md](DECISIONS.md) (ADR-001).
 - Reads are leader-coordinated. There is no leader lease, read-index protocol,
   follower-local read, or gateway-side gathering yet; every read uses one Raft
   round trip for metadata and then owner fetches from the leader.
-- Read repair is an in-process best-effort queue with no retry or backoff.
-  Background failure detection, scheduled repair, orphan sweeping, and clearing
-  `metadata.degraded` are task 09. Degraded metadata therefore stays set until
-  the repair subsystem confirms all five fragments are present.
+- Repair state is derived from metadata and the in-process queue. There is no
+  persistent repair journal; a leader restart rebuilds work from metadata and
+  the periodic sweep. This is intentional for the course scope.
 - Ambient orphan fragments can remain when a metadata commit is ambiguous or a
-  process dies mid-GC. They are invisible to reads and are removed by the task 09
-  orphan sweep after a grace period.
+  process dies mid-GC. They are invisible to reads and are removed by the local
+  orphan sweep after `ORPHAN_GRACE_PERIOD`.
+- Membership is fixed at five nodes. Adding or removing a node changes
+  deterministic placement; dynamic membership and automatic migration of an
+  existing stripe to a new node set are future work.
 - `x-kv-forwarded` prevents loops but assumes `PEERS` is complete and correct.
 - TLS is optional but not provisioned automatically; the Compose cluster runs
   in plaintext.
-- Raft membership changes go through `Join`; there is no automatic rebalancing.
