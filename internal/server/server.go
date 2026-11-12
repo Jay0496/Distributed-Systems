@@ -111,6 +111,9 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 		Timeout:     cfg.WriteTimeout + cfg.ReadTimeout,
 		MaxAttempts: cfg.RepairMaxAttempts,
 	}, srv.repairer.Process)
+	if queue, ok := srv.repairQueue.(*cluster.Queue); ok {
+		srv.repairer.SetQueue(queue)
+	}
 	return srv
 }
 
