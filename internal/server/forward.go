@@ -146,6 +146,46 @@ func (s *Server) forwardPut(ctx context.Context, req *pb.PutRequest) (*pb.PutRes
 	return &pb.PutResponse{Success: false, Message: fmt.Sprintf("forward to leader %s failed: %v", target, lastErr)}, nil
 }
 
+// forwardToLeader performs one admin RPC against the current leader. It keeps
+// the same forwarding guard and retry policy as Put/Get: a request that
+// already made one hop is rejected, and only an unavailable transport is
+// retried. The callback writes its response into a caller-owned variable.
+func (s *Server) forwardToLeader(ctx context.Context, call func(context.Context, pb.StorageServiceClient) error) error {
+	if alreadyForwarded(ctx) {
+		return status.Error(codes.FailedPrecondition, "request was forwarded but this node is not the leader")
+	}
+
+	target, ok := s.leaderGRPCAddr()
+	if !ok {
+		return status.Error(codes.Unavailable, "not the leader and no leader is known")
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		conn, err := s.getConn(ctx, target)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		fctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
+		fctx = metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true")
+		err = call(fctx, pb.NewStorageServiceClient(conn))
+		cancel()
+
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if status.Code(err) != codes.Unavailable {
+			return err
+		}
+		s.dropConn(target)
+	}
+
+	return status.Errorf(codes.Unavailable, "forward admin request to leader %s failed: %v", target, lastErr)
+}
+
 // forwardGet forwards a read to the leader. It retries once on Unavailable.
 func (s *Server) forwardGet(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
 	if alreadyForwarded(ctx) {
