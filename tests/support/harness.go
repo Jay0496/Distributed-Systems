@@ -33,6 +33,7 @@ type Cluster struct {
 	Peers map[string]string
 
 	byID map[string]*Node
+	dial func(context.Context, string) (*grpc.ClientConn, error)
 
 	mu          sync.RWMutex
 	unreachable map[string]bool
@@ -52,6 +53,9 @@ type Node struct {
 	Conn    *grpc.ClientConn
 	lis     *bufconn.Listener
 	grpcSrv *grpc.Server
+
+	storePath string
+	transport *raft.InmemTransport
 }
 
 // StartCluster starts count in-process nodes and waits for a leader. Every node
@@ -79,7 +83,7 @@ func StartCluster(t testing.TB, count int) *Cluster {
 		servers = append(servers, raft.Server{ID: raft.ServerID(id), Address: addr})
 
 		dir := t.TempDir()
-		n := &Node{ID: id, Addr: addr, Dir: dir}
+		n := &Node{ID: id, Addr: addr, Dir: dir, storePath: filepath.Join(dir, "node.db"), transport: transport}
 		n.lis = bufconn.Listen(clusterBufSize)
 		c.Nodes[i] = n
 		c.byID[id] = n
@@ -114,9 +118,11 @@ func StartCluster(t testing.TB, count int) *Cluster {
 		)
 	}
 
+	c.dial = dial
+
 	bootstrap := raft.Configuration{Servers: servers}
 	for i, n := range c.Nodes {
-		store, err := storage.NewSQLiteStore(filepath.Join(n.Dir, "node.db"))
+		store, err := storage.NewSQLiteStore(n.storePath)
 		if err != nil {
 			t.Fatalf("support: open store for %s: %v", n.ID, err)
 		}
@@ -169,6 +175,9 @@ func StartCluster(t testing.TB, count int) *Cluster {
 		for _, n := range c.Nodes {
 			if n.grpcSrv != nil {
 				n.grpcSrv.Stop()
+			}
+			if n.Server != nil {
+				_ = n.Server.Close()
 			}
 			if n.Conn != nil {
 				_ = n.Conn.Close()
@@ -226,6 +235,103 @@ func (c *Cluster) SetReachable(ids ...string) {
 			n.Server.DropConnections()
 		}
 	}
+}
+
+// StopNode shuts down one node's gRPC server, Raft instance, and SQLite store
+// without closing its in-memory transport or deleting its data. A later
+// StartNode uses the same directory and transport to simulate a process
+// restart.
+func (c *Cluster) StopNode(t testing.TB, id string) {
+	t.Helper()
+
+	c.mu.RLock()
+	n, ok := c.byID[id]
+	c.mu.RUnlock()
+	if !ok {
+		t.Fatalf("support: unknown node %q", id)
+	}
+
+	if n.Server != nil {
+		_ = n.Server.Close()
+	}
+	if n.grpcSrv != nil {
+		n.grpcSrv.Stop()
+		n.grpcSrv = nil
+	}
+	if n.Conn != nil {
+		_ = n.Conn.Close()
+		n.Conn = nil
+		n.Client = nil
+	}
+	if n.Raft != nil {
+		if err := n.Raft.Close(); err != nil {
+			t.Fatalf("support: close raft %s: %v", id, err)
+		}
+		n.Raft = nil
+	}
+	if n.Store != nil {
+		if err := n.Store.Close(); err != nil {
+			t.Fatalf("support: close store %s: %v", id, err)
+		}
+		n.Store = nil
+	}
+	if n.lis != nil {
+		_ = n.lis.Close()
+		n.lis = nil
+	}
+	n.Server = nil
+}
+
+// StartNode reopens a stopped node from its persisted SQLite and Raft state and
+// restores its gRPC front end on the same in-memory transport.
+func (c *Cluster) StartNode(t testing.TB, id string) {
+	t.Helper()
+
+	c.mu.RLock()
+	n, ok := c.byID[id]
+	c.mu.RUnlock()
+	if !ok {
+		t.Fatalf("support: unknown node %q", id)
+	}
+	if n.Raft != nil {
+		t.Fatalf("support: node %s is already running", id)
+	}
+
+	store, err := storage.NewSQLiteStore(n.storePath)
+	if err != nil {
+		t.Fatalf("support: reopen store for %s: %v", id, err)
+	}
+	n.Store = store
+
+	raftNode, err := consensus.StartRaft(n.ID, store, n.transport, n.Dir, raft.Configuration{})
+	if err != nil {
+		t.Fatalf("support: restart raft for %s: %v", id, err)
+	}
+	n.Raft = raftNode
+
+	cfg := config.Config{
+		NodeID:  n.ID,
+		DataDir: n.Dir,
+		Peers:   c.Peers,
+	}.WithDefaults()
+	n.Server = server.New(cfg, store, raftNode, c.dial)
+
+	n.lis = bufconn.Listen(clusterBufSize)
+	n.grpcSrv = grpc.NewServer(
+		grpc.MaxRecvMsgSize(cfg.MaxMessageSize),
+		grpc.MaxSendMsgSize(cfg.MaxMessageSize),
+	)
+	pb.RegisterStorageServiceServer(n.grpcSrv, n.Server)
+	go func(srv *grpc.Server, lis *bufconn.Listener) {
+		_ = srv.Serve(lis)
+	}(n.grpcSrv, n.lis)
+
+	conn, err := c.dial(context.Background(), n.ID)
+	if err != nil {
+		t.Fatalf("support: dial restarted %s: %v", id, err)
+	}
+	n.Conn = conn
+	n.Client = pb.NewStorageServiceClient(conn)
 }
 
 // WaitLeader waits for exactly one node to report itself leader.
