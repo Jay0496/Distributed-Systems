@@ -30,6 +30,15 @@ type dialFunc func(ctx context.Context, target string) (*grpc.ClientConn, error)
 // the shared rpc helper attaches AUTH_TOKEN and raises the gRPC message limit
 // for every internal client.
 func newDialFunc(cfg config.Config) dialFunc {
+	return dialFuncFor(cfg, func(ctx context.Context, target string, opts []grpc.DialOption) (*grpc.ClientConn, error) {
+		return grpc.DialContext(ctx, target, opts...)
+	})
+}
+
+// dialFuncFor builds the shared internal dialer around a transport-specific
+// dial call. Tests inject a bufconn dialer here while exercising the same
+// AUTH_TOKEN and MAX_MESSAGE_SIZE options as production.
+func dialFuncFor(cfg config.Config, dialContext func(context.Context, string, []grpc.DialOption) (*grpc.ClientConn, error)) dialFunc {
 	shared, sharedErr := rpc.DialOptions(cfg.AuthToken, cfg.MaxMessageSize)
 	return func(ctx context.Context, target string) (*grpc.ClientConn, error) {
 		if sharedErr != nil {
@@ -46,7 +55,7 @@ func newDialFunc(cfg config.Config) dialFunc {
 			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		}
 		opts = append(opts, grpc.WithBlock())
-		return grpc.DialContext(ctx, target, opts...)
+		return dialContext(ctx, target, opts)
 	}
 }
 

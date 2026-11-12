@@ -17,6 +17,7 @@ import (
 	"distributed-kv-store/internal/cluster"
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/consensus"
+	"distributed-kv-store/internal/rpc"
 	"distributed-kv-store/internal/server"
 	"distributed-kv-store/internal/storage"
 
@@ -106,8 +107,19 @@ func main() {
 		grpc.MaxSendMsgSize(cfg.MaxMessageSize),
 	)
 
+	// AUTH_TOKEN is enforced by interceptors at the process boundary. Health
+	// checks stay exempt so Compose and the detector keep working.
+	if cfg.AuthToken != "" {
+		grpcOpts = append(grpcOpts, server.AuthServerOptions(cfg.AuthToken)...)
+	}
+
 	grpcServer := grpc.NewServer(grpcOpts...)
 	storageServer := server.New(cfg, store, node, nil)
+	if cfg.AuthToken != "" {
+		storageServer.EnableAuth()
+	} else {
+		log.Printf("WARNING: AUTH_TOKEN is not set; gRPC authentication is disabled")
+	}
 	if err := storageServer.CheckAuth(); err != nil {
 		log.Fatalf("Invalid authorization configuration: %v", err)
 	}
@@ -218,8 +230,15 @@ func joinCluster(cfg config.Config, raftAddr string) {
 	}
 
 	go func() {
+		opts, err := rpc.DialOptions(cfg.AuthToken, cfg.MaxMessageSize)
+		if err != nil {
+			log.Printf("join disabled: %v", err)
+			return
+		}
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+
 		for attempt := 1; attempt <= 10; attempt++ {
-			conn, err := grpc.Dial(cfg.JoinAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			conn, err := grpc.Dial(cfg.JoinAddr, opts...)
 			if err == nil {
 				client := pb.NewStorageServiceClient(conn)
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

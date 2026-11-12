@@ -96,10 +96,12 @@
 // simple; task 09 replaces it with a cached background detector and this
 // handler will read the cache.
 //
-// Authorizer is the task 10 seam. The allow-all implementation is installed only
-// when AUTH_TOKEN is empty; CheckAuth refuses to start an authenticated server
-// without an authorizer. Internal clients use internal/rpc.DialOptions to attach
-// the bearer token and the configured message limit.
+// AUTH_TOKEN is enforced by UnaryAuthInterceptor and StreamAuthInterceptor,
+// which require "authorization: Bearer <token>" on every method except the two
+// grpc.health.v1.Health methods. CheckAuth refuses to start an authenticated
+// server when the process did not install those interceptors. Internal clients
+// use internal/rpc.DialOptions to attach the bearer token and the configured
+// message limit.
 //
 // # Fragment transport v2
 //
