@@ -52,6 +52,18 @@ func metadataApply(store *testStore) applyFunc {
 				result.OldMeta = &old
 			}
 			return result, nil
+		case consensus.OpSetMetaStatus:
+			updated, err := store.ApplyMetaStatus(1, cmd.Key, cmd.StripeID, cmd.Version, cmd.Degraded)
+			if err != nil {
+				if errors.Is(err, storage.ErrConflict) {
+					return &consensus.Result{Err: consensus.ResultErrConflict}, nil
+				}
+				if errors.Is(err, storage.ErrNotFound) {
+					return &consensus.Result{Err: consensus.ResultErrNotFound}, nil
+				}
+				return &consensus.Result{Err: consensus.ResultErrInternal}, nil
+			}
+			return &consensus.Result{Meta: &updated, Found: true}, nil
 		default:
 			return nil, fmt.Errorf("unexpected command %q", cmd.Op)
 		}

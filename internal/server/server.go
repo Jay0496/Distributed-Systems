@@ -55,9 +55,17 @@ type Server struct {
 	readMu   sync.Mutex
 	readRand *rand.Rand
 
-	// repairQueue runs asynchronous read repair. It is bounded and never
-	// blocks a client read; task 09 replaces it with the shared repair queue.
-	repairQueue cluster.RepairQueue
+	// repairQueue runs asynchronous read repair and background repairs. It is
+	// bounded and never blocks a client read.
+	repairQueue RepairQueue
+
+	// repairer owns reconstruction and rebalancing. Every node constructs one;
+	// only the leader processes metadata work because the detector gates it.
+	repairer *cluster.Repairer
+
+	// detector is the leader's cached health map. It is nil in unit tests that
+	// exercise the on-demand ClusterHealth probe.
+	detector *cluster.Detector
 }
 
 // New builds a Server with its connection cache and dialer.
@@ -83,17 +91,62 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 	// The method value is bound after construction so Server can own the
 	// default apply implementation without a package-level helper.
 	srv.apply = srv.applyRaft
-	srv.repairQueue = cluster.NewRepairQueue(
-		cfg.ReadRepairWorkers,
-		readRepairQueueCapacity,
-		cfg.WriteTimeout,
-		srv.performReadRepair,
-	)
+
+	srv.repairer = cluster.NewRepairer(cluster.RepairerOptions{
+		Store:         store,
+		Reader:        srv,
+		Uploader:      srv,
+		Statter:       srv,
+		MetaStatus:    srv,
+		Placer:        srv.placer,
+		Nodes:         srv.nodeIDs(),
+		SelfNode:      cfg.NodeID,
+		MaxAttempts:   cfg.RepairMaxAttempts,
+		SweepInterval: cfg.RepairSweepInterval,
+		RateLimit:     cfg.RepairRateLimit,
+	})
+	srv.repairQueue = cluster.NewQueue(cluster.QueueOptions{
+		Workers:     cfg.RepairWorkers,
+		Capacity:    repairQueueCapacity,
+		Timeout:     cfg.WriteTimeout + cfg.ReadTimeout,
+		MaxAttempts: cfg.RepairMaxAttempts,
+	}, srv.repairer.Process)
 	return srv
+}
+
+// Repairer exposes the node's repairer for wiring by cmd/server and tests.
+func (s *Server) Repairer() *cluster.Repairer {
+	return s.repairer
+}
+
+// SetDetector attaches the leader-gated failure detector to the health surface
+// and the repairer. It must be called before StartFailureManagement.
+func (s *Server) SetDetector(detector *cluster.Detector) {
+	s.detector = detector
+	if s.repairer != nil {
+		s.repairer.SetDetector(detector)
+	}
+}
+
+// StartFailureManagement starts the detector and repair loops on this node.
+func (s *Server) StartFailureManagement(ctx context.Context) {
+	if s.repairer != nil {
+		s.repairer.Start(ctx)
+	}
+}
+
+// AttachFailureManagement is the production wiring helper: it stores the
+// detector for health reporting and starts the repairer.
+func (s *Server) AttachFailureManagement(ctx context.Context, detector *cluster.Detector) {
+	s.SetDetector(detector)
+	s.StartFailureManagement(ctx)
 }
 
 // Close stops background repair workers. It is safe to call more than once.
 func (s *Server) Close() error {
+	if s.repairer != nil {
+		s.repairer.Stop()
+	}
 	if s.repairQueue != nil {
 		s.repairQueue.Close()
 	}

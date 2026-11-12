@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"distributed-kv-store/internal/cluster"
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/consensus"
 	"distributed-kv-store/internal/server"
@@ -119,6 +120,24 @@ func main() {
 	// Optionally join an existing cluster through a live leader.
 	joinCluster(cfg, string(transport.LocalAddr()))
 
+	// Start leader-gated failure detection and repair. Every node runs the
+	// detector supervisor, but only the leader probes peers and reconstructs
+	// shards; the local orphan sweep runs everywhere.
+	failureCtx, stopFailure := context.WithCancel(context.Background())
+	defer stopFailure()
+	detector := cluster.NewDetector(cluster.DetectorOptions{
+		Interval:  cfg.DetectInterval,
+		Timeout:   cfg.DetectTimeout,
+		Failures:  cfg.DetectFailures,
+		Successes: cfg.DetectSuccesses,
+		Nodes:     detectorNodes(cfg),
+		SelfNode:  cfg.NodeID,
+		Probe:     storageServer.ProbePeer,
+		IsLeader:  func() bool { return node.Raft.State() == raft.Leader },
+		LeaderCh:  node.Raft.LeaderCh(),
+	})
+	storageServer.AttachFailureManagement(failureCtx, detector)
+
 	// Shut down cleanly on SIGINT/SIGTERM so the BoltDB file lock is released
 	// (important for fast container restarts) and in-flight RPCs can drain.
 	sigCh := make(chan os.Signal, 1)
@@ -126,6 +145,8 @@ func main() {
 	go func() {
 		<-sigCh
 		log.Printf("received shutdown signal, stopping %s", cfg.NodeID)
+		stopFailure()
+		_ = storageServer.Close()
 		grpcServer.GracefulStop()
 		_ = node.Close()
 		_ = transport.Close()
@@ -138,8 +159,23 @@ func main() {
 	}
 
 	// If Serve returns without a signal, still release Raft and BoltDB.
+	stopFailure()
+	_ = storageServer.Close()
 	_ = node.Close()
 	_ = transport.Close()
+}
+
+// detectorNodes builds the detector's node-to-gRPC-address map, including the
+// local node when PEERS omits it.
+func detectorNodes(cfg config.Config) map[string]string {
+	nodes := make(map[string]string, len(cfg.Peers)+1)
+	for id, addr := range cfg.Peers {
+		nodes[id] = addr
+	}
+	if _, ok := nodes[cfg.NodeID]; !ok {
+		nodes[cfg.NodeID] = fmt.Sprintf("%s:%s", cfg.NodeID, cfg.GRPCPort)
+	}
+	return nodes
 }
 
 // joinCluster asks the node configured in JOIN_ADDR to add this node as a

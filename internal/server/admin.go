@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"distributed-kv-store/internal/cluster"
 	"distributed-kv-store/internal/consensus"
 	"distributed-kv-store/internal/redundancy"
 	"distributed-kv-store/internal/storage"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/hashicorp/raft"
 	"google.golang.org/grpc/codes"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 )
 
@@ -143,8 +145,7 @@ func (s *Server) forwardDelete(ctx context.Context, req *pb.DeleteRequest) (*pb.
 }
 
 // Stats reports this node's local storage and repair counters. It never
-// forwards: every node can answer from its own SQLite file. Repair counters
-// stay at zero until task 09 introduces the shared repair queue.
+// forwards: every node can answer from its own SQLite file.
 func (s *Server) Stats(ctx context.Context, _ *pb.StatsRequest) (*pb.StatsResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, status.Error(codes.Canceled, err.Error())
@@ -153,6 +154,7 @@ func (s *Server) Stats(ctx context.Context, _ *pb.StatsRequest) (*pb.StatsRespon
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read local stats: %v", err)
 	}
+	queue := s.localQueueStats()
 
 	leader := s.node != nil && s.node.Raft != nil && s.node.Raft.State() == raft.Leader
 	return &pb.StatsResponse{
@@ -163,11 +165,20 @@ func (s *Server) Stats(ctx context.Context, _ *pb.StatsRequest) (*pb.StatsRespon
 		Stripes:          nonNegative(stats.StripeCount),
 		Fragments:        nonNegative(stats.FragmentCount),
 		StorageBytes:     nonNegative(stats.Bytes),
-		RepairQueueDepth: 0,
-		RepairsCompleted: 0,
-		RepairsFailed:    0,
+		RepairQueueDepth: uint64(queue.Depth),
+		RepairsCompleted: queue.Completed,
+		RepairsFailed:    queue.Failed,
 		UptimeSeconds:    s.uptimeSeconds(),
 	}, nil
+}
+
+// localQueueStats reads the shared queue counters when the configured queue
+// exposes them. A test double that only implements Enqueue/Close reports zero.
+func (s *Server) localQueueStats() cluster.QueueStats {
+	if provider, ok := s.repairQueue.(interface{ Stats() cluster.QueueStats }); ok {
+		return provider.Stats()
+	}
+	return cluster.QueueStats{}
 }
 
 // ClusterHealth reports the leader, global mode, and an on-demand probe of
@@ -183,9 +194,9 @@ func (s *Server) ClusterHealth(ctx context.Context, req *pb.ClusterHealthRequest
 	return s.clusterHealth(ctx)
 }
 
-// clusterHealth probes all voters in parallel with the configured short
-// timeout. This is intentionally on demand: task 09 replaces it with a cached
-// background detector and this handler will read that cache.
+// clusterHealth reports the cached detector view when available and falls back
+// to an on-demand probe for nodes the detector has not seen. The detector is
+// maintained by the leader, so followers still forward here.
 func (s *Server) clusterHealth(ctx context.Context) (*pb.ClusterHealthResponse, error) {
 	configuration, err := s.raftConfiguration(s.cfg.ClusterProbeTimeout)
 	if err != nil {
@@ -214,9 +225,18 @@ func (s *Server) clusterHealth(ctx context.Context) (*pb.ClusterHealthResponse, 
 		}
 	}
 
+	var cached map[string]cluster.NodeState
+	if s.detector != nil {
+		cached = s.detector.Snapshot()
+	}
+
 	nodes := make([]*pb.NodeHealth, len(servers))
 	var wg sync.WaitGroup
 	for i, server := range servers {
+		if state, ok := cached[string(server.ID)]; ok {
+			nodes[i] = healthFromState(state)
+			continue
+		}
 		wg.Add(1)
 		go func(i int, server raft.Server) {
 			defer wg.Done()
@@ -233,6 +253,7 @@ func (s *Server) clusterHealth(ctx context.Context) (*pb.ClusterHealthResponse, 
 	}
 	total := uint32(len(nodes))
 	degraded := healthy != total || degradedStripes > 0
+	queue := s.localQueueStats()
 
 	message := fmt.Sprintf("%d/%d nodes healthy, %d degraded stripes", healthy, total, degradedStripes)
 	if leaderID == "" {
@@ -248,9 +269,28 @@ func (s *Server) clusterHealth(ctx context.Context) (*pb.ClusterHealthResponse, 
 		TotalNodes:       total,
 		Nodes:            nodes,
 		DegradedStripes:  degradedStripes,
-		RepairQueueDepth: 0,
+		RepairQueueDepth: uint64(queue.Depth),
 		Message:          message,
 	}, nil
+}
+
+// healthFromState converts a cached detector entry to the wire shape.
+func healthFromState(state cluster.NodeState) *pb.NodeHealth {
+	health := &pb.NodeHealth{
+		NodeId:     state.NodeID,
+		GrpcAddr:   state.GRPCAddr,
+		Healthy:    state.Healthy,
+		Leader:     state.Leader,
+		Error:      state.LastError,
+		RaftState:  "",
+	}
+	if !state.LastSeen.IsZero() {
+		health.LastSeenUnix = state.LastSeen.Unix()
+	}
+	if state.Leader {
+		health.RaftState = raft.Leader.String()
+	}
+	return health
 }
 
 // probeNode asks one voter for NodeStatus and Stats. A node is healthy only
@@ -307,6 +347,63 @@ func (s *Server) remoteNodeStatus(ctx context.Context, nodeID string) (*pb.NodeS
 	}
 	defer closer()
 	return client.NodeStatus(ctx, &pb.NodeStatusRequest{})
+}
+
+// ProbePeer performs one detector probe: the standard gRPC health service plus
+// NodeStatus. Both must succeed. The health service stays unauthenticated; the
+// NodeStatus call rides the shared cached dialer, which carries AUTH_TOKEN in
+// production. This method is wired as cluster.DetectorOptions.Probe.
+func (s *Server) ProbePeer(ctx context.Context, nodeID, grpcAddr string) (cluster.NodeState, error) {
+	state := cluster.NodeState{NodeID: nodeID, GRPCAddr: grpcAddr}
+	probeCtx, cancel := context.WithTimeout(ctx, s.cfg.ClusterProbeTimeout)
+	defer cancel()
+
+	if nodeID == s.cfg.NodeID {
+		status, err := s.NodeStatus(probeCtx, &pb.NodeStatusRequest{})
+		if err != nil {
+			return state, err
+		}
+		state.LastSeen = time.Now()
+		state.Leader = status.GetState() == raft.Leader.String()
+		return state, nil
+	}
+
+	target := grpcAddr
+	if target == "" {
+		target = s.grpcAddrFor(nodeID)
+	}
+	if target == "" {
+		return state, fmt.Errorf("no gRPC address for node %q", nodeID)
+	}
+	conn, err := s.getConn(probeCtx, target)
+	if err != nil {
+		return state, fmt.Errorf("dial %q: %w", nodeID, err)
+	}
+
+	health, err := healthpb.NewHealthClient(conn).Check(probeCtx, &healthpb.HealthCheckRequest{
+		Service: "storage.StorageService",
+	})
+	if err != nil {
+		if status.Code(err) == codes.Unavailable {
+			s.dropConn(target)
+		}
+		return state, fmt.Errorf("health check %q: %w", nodeID, err)
+	}
+	if health.GetStatus() != healthpb.HealthCheckResponse_SERVING {
+		return state, fmt.Errorf("node %q health is %s", nodeID, health.GetStatus())
+	}
+
+	statusResp, err := pb.NewStorageServiceClient(conn).NodeStatus(probeCtx, &pb.NodeStatusRequest{})
+	if err != nil {
+		if status.Code(err) == codes.Unavailable {
+			s.dropConn(target)
+		}
+		return state, fmt.Errorf("node status %q: %w", nodeID, err)
+	}
+
+	state.LastSeen = time.Now()
+	state.Leader = statusResp.GetState() == raft.Leader.String()
+	return state, nil
 }
 
 func (s *Server) remoteStats(ctx context.Context, nodeID string) (*pb.StatsResponse, error) {

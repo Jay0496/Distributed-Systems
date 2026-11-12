@@ -3,10 +3,18 @@ package cluster
 import (
 	"container/heap"
 	"context"
+	"errors"
 	"math/rand"
 	"sync"
 	"time"
 )
+
+// ErrRepairQueueFull reports that the bounded repair queue has no capacity for
+// a task of this priority. A read that encounters it still succeeds.
+var ErrRepairQueueFull = errors.New("repair queue is full")
+
+// ErrRepairQueueClosed reports an enqueue after Close.
+var ErrRepairQueueClosed = errors.New("repair queue is closed")
 
 // Priority orders repair work. Lower values run first.
 type Priority int
