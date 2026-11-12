@@ -12,7 +12,7 @@ each node keeps its own persistent Raft log on disk.
 | Area | Owner | State |
 | --- | --- | --- |
 | Raft consensus, snapshots, forwarding, gRPC surface | Jay Savaliya | Complete for this phase |
-| CLI / routing gateway | Khalid | In progress (`cmd/gateway/`, `internal/gateway/`) |
+| CLI / routing gateway | Khalid | Complete (`cmd/gateway/`, `internal/gateway/`) |
 | SQLite persistence | Parth | Complete for this task (`internal/storage/`, `node.db`) |
 | Failure management / Reed-Solomon redundancy | Dhruvin | Engines and placement implemented (`internal/redundancy`); write-path integration in task 06 |
 
@@ -42,18 +42,18 @@ state layout, and recovery behaviour. Design trade-offs are recorded in
 | Path | Purpose |
 | --- | --- |
 | `cmd/server/` | Process entrypoint: config loading, Raft/gRPC startup, TLS, health, signals |
-| `cmd/gateway/` | CLI entrypoint: argument parsing and gRPC client calls |
+| `cmd/gateway/` | CLI entrypoint: gateway configuration, client construction, command dispatch |
 | `cmd/healthcheck/` | Tiny binary used by Docker Compose health checks |
 | `cmd/bench/` | Benchmark harness placeholder |
 | `internal/config/` | Environment configuration parsing |
-| `internal/server/` | gRPC handlers: `Put`, `Get`, `Heartbeat`, `Join`, `NodeStatus`, fragments, repair |
+| `internal/server/` | gRPC handlers: `Put`, `Get`, `Heartbeat`, `Join`, `NodeStatus`, fragments, repair, admin, auth |
 | `internal/server/forward.go` | Leader discovery, cached client connections, one-hop forwarding, retry and loop guard |
 | `internal/server/fragments.go` | `UploadFragment`, `DownloadFragment`, `Repair` handlers |
 | `internal/redundancy/` | RS(3,2), five-copy replication, shard checksums, deterministic five-node placement |
 | `internal/consensus/raft.go` | Raft node: BoltDB log/stable store, file snapshots, bootstrap, `AddVoter`, `Close` |
 | `internal/consensus/fsm.go` | FSM: put/get commands, real snapshot and restore |
 | `internal/storage/` | `Store` interface, SQLite metadata/fragment/config repositories, snapshots |
-| `internal/gateway/` | Consistent-hash router |
+| `internal/gateway/` | Consistent-hash entry ring, retrying client, CLI commands, table/JSON rendering |
 | `internal/cluster/` | Failure detection, degraded-mode reporting, repair scheduling (created now, populated later) |
 | `proto/storage.proto` | gRPC contract (generated files are committed) |
 | `tests/` | Unit, integration, chaos, and benchmark suites (see `tests/README.md`) |
@@ -106,23 +106,77 @@ docker compose down        # keeps data
 docker compose down -v     # deletes data volumes
 ```
 
+## Gateway CLI
+
+The CLI is a one-shot Compose tool, not a long-running service. It never uses a
+hardcoded node address: `GATEWAY_NODES` is required and maps node IDs to gRPC
+addresses. For each key the consistent-hash ring picks an **entry node**; that
+node forwards to the Raft leader, and the leader performs shard placement and
+fan-out. Consistent hashing spreads client connections and gives the retry loop a
+deterministic fallback order, not a different data layout.
+
+```powershell
+# Store with a per-request mode override
+docker compose run --rm gateway put demo-key "hello" --mode rs32
+
+# Read it back (value on stdout, forwarding metadata on stderr)
+docker compose run --rm gateway get demo-key
+
+# Toggle the cluster-wide default; no argument reads it
+docker compose run --rm gateway mode replication
+docker compose run --rm gateway mode
+
+# Operator views
+docker compose run --rm gateway status
+docker compose run --rm gateway health
+docker compose run --rm gateway stats
+docker compose run --rm gateway repair demo-key --force
+```
+
+Use `--json` on any command for machine-readable output, `--version N` for a
+compare-and-swap write or delete, and `--value-file PATH` for large values.
+`health` prints one line and exits non-zero unless every voter is healthy, a
+leader is known, and no committed stripe is degraded.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `GATEWAY_NODES` | required | `id=host:port,...`; no localhost fallback |
+| `GATEWAY_VNODES` | `100` | Virtual nodes per host on the hash ring |
+| `GATEWAY_TIMEOUT` | `15s` | Deadline for one RPC attempt |
+| `GATEWAY_RETRIES` | `3` | Retries after the first attempt (`0` disables retries) |
+| `AUTH_TOKEN` | empty | Optional bearer token; empty disables auth with a startup warning |
+| `MAX_MESSAGE_SIZE` | `32 MiB` | Client message limit, matched to the server |
+
+Retries use 100 ms, 250 ms, and 500 ms steps with ±20% jitter. An unavailable or
+timed-out node falls through to the next candidate; an `Aborted` write
+re-resolves the leader and tries again; validation, auth, and not-found errors
+return immediately. `put` is last-write-wins unless `--version` is supplied;
+`delete` is idempotent. When `AUTH_TOKEN` is set, the client and every
+server-internal client send `authorization: Bearer <token>` through the shared
+`internal/rpc` helper. Only `/grpc.health.v1.Health/Check` and
+`/grpc.health.v1.Health/Watch` bypass authentication; see
+[docs/SECURITY.md](docs/SECURITY.md).
+
 ## API
 
 | RPC | Purpose |
 | --- | --- |
-| `Put(key, value, mode)` | Linearizable write; followers forward to the leader |
-| `Get(key)` | Linearizable read from the committed log; followers forward |
+| `Put(key, value, mode, expected_version)` | Linearizable metadata write; followers forward to the leader |
+| `Get(key)` | Linearizable read; followers forward |
+| `Delete(key, expected_version)` | Idempotent metadata delete plus fragment GC; followers forward |
+| `GetConfig()` / `SetConfig(default_mode)` | Read or commit the cluster-wide default mode through Raft |
+| `ClusterHealth()` | Leader, mode, degraded state, and a probe of every voter |
+| `Stats()` | Local storage and repair counters; any node may answer |
 | `Heartbeat(node_id)` | Liveness probe kept for compatibility |
 | `Join(node_id, raft_addr, grpc_addr)` | Ask the leader to add a voter; followers return a leader hint |
 | `NodeStatus()` | Node ID, Raft state, leader, term, commit/applied/last index |
 | `UploadFragment(stream)` / `DownloadFragment` | Chunk transport for the redundancy work |
-| `Repair(key)` | Scaffold for failure-management reconstruction |
+| `Repair(key, stripe_id, force)` | Enqueue shard reconstruction on the leader |
 
 `mode` accepts `""` (default), `"replication"`, or `"rs32"`; anything else is
-rejected before it reaches Raft. The RS(3,2) and five-copy replication engines
-are implemented and unit-tested in `internal/redundancy`, but the transitional
-server still commits full values through the FSM until tasks 06 and 07 wire them
-into the fragment write and read paths. See
+rejected before it reaches Raft. Writes encode the value with the selected
+engine, push five shards or copies out of band, then commit metadata-only state
+through Raft. Reads gather enough verified shards to reconstruct the value. See
 [internal/redundancy/README.md](internal/redundancy/README.md).
 
 ## Tests

@@ -428,11 +428,11 @@ func TestCheckAuth(t *testing.T) {
 
 	locked := &Server{cfg: config.Config{AuthToken: "token"}}
 	if err := locked.CheckAuth(); err == nil {
-		t.Fatal("AUTH_TOKEN without an authorizer did not refuse to start")
+		t.Fatal("AUTH_TOKEN without interceptors did not refuse to start")
 	}
 
-	locked.SetAuthorizer(allowAllAuthorizer{})
+	locked.EnableAuth()
 	if err := locked.CheckAuth(); err != nil {
-		t.Fatalf("configured authorizer rejected: %v", err)
+		t.Fatalf("configured interceptors rejected: %v", err)
 	}
 }

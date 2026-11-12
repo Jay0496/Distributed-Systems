@@ -225,6 +225,12 @@ func StartCluster(t testing.TB, count int) *Cluster {
 	return c
 }
 
+// Dialer exposes the cluster's in-process gRPC dial function so integration
+// tests can drive the real gateway client over bufconn.
+func (c *Cluster) Dialer() func(context.Context, string) (*grpc.ClientConn, error) {
+	return c.dial
+}
+
 // EnableFailureManagement starts a leader-gated detector and repairer on every
 // node. Interval, failure, and success thresholds are short so chaos tests can
 // observe transitions without waiting for production defaults.

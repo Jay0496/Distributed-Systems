@@ -40,6 +40,10 @@ func clearConfigEnv(t *testing.T) {
 		"TLS_CA_FILE",
 		"BOOTSTRAP_SERVERS",
 		"PEERS",
+		"GATEWAY_NODES",
+		"GATEWAY_VNODES",
+		"GATEWAY_TIMEOUT",
+		"GATEWAY_RETRIES",
 	} {
 		t.Setenv(key, "")
 	}
@@ -260,6 +264,92 @@ func TestLoadIgnoresMalformedPeerEntries(t *testing.T) {
 	}
 	if got := cfg.Peers["node2"]; got != "node2:50052" {
 		t.Errorf("Peers[node2] = %q, want node2:50052", got)
+	}
+}
+
+func TestLoadGatewayConfigRequiresNodes(t *testing.T) {
+	clearConfigEnv(t)
+
+	if _, err := config.LoadGatewayConfig(); err == nil {
+		t.Fatal("LoadGatewayConfig succeeded without GATEWAY_NODES")
+	}
+}
+
+func TestLoadGatewayConfigDefaults(t *testing.T) {
+	clearConfigEnv(t)
+
+	t.Setenv("GATEWAY_NODES", "node3=node3:50053,node1=node1:50051,node2=node2:50052")
+	t.Setenv("AUTH_TOKEN", "  secret  ")
+	t.Setenv("MAX_MESSAGE_SIZE", "1048576")
+
+	cfg, err := config.LoadGatewayConfig()
+	if err != nil {
+		t.Fatalf("LoadGatewayConfig: %v", err)
+	}
+	if len(cfg.Nodes) != 3 || cfg.Nodes["node2"] != "node2:50052" {
+		t.Fatalf("Nodes = %v", cfg.Nodes)
+	}
+	wantOrder := []string{"node1", "node2", "node3"}
+	if len(cfg.Order) != len(wantOrder) {
+		t.Fatalf("Order = %v, want %v", cfg.Order, wantOrder)
+	}
+	for i, id := range wantOrder {
+		if cfg.Order[i] != id {
+			t.Fatalf("Order = %v, want %v", cfg.Order, wantOrder)
+		}
+	}
+	if cfg.VNodes != config.DefaultGatewayVNodes {
+		t.Errorf("VNodes = %d, want %d", cfg.VNodes, config.DefaultGatewayVNodes)
+	}
+	if cfg.Timeout != config.DefaultGatewayTimeout {
+		t.Errorf("Timeout = %v, want %v", cfg.Timeout, config.DefaultGatewayTimeout)
+	}
+	if cfg.Retries != config.DefaultGatewayRetries {
+		t.Errorf("Retries = %d, want %d", cfg.Retries, config.DefaultGatewayRetries)
+	}
+	if cfg.Token != "secret" {
+		t.Errorf("Token = %q, want secret", cfg.Token)
+	}
+	if cfg.MaxMessageBytes != 1048576 {
+		t.Errorf("MaxMessageBytes = %d, want 1048576", cfg.MaxMessageBytes)
+	}
+
+	addrs := cfg.NodeAddrs()
+	wantAddrs := []string{"node1:50051", "node2:50052", "node3:50053"}
+	if len(addrs) != len(wantAddrs) {
+		t.Fatalf("NodeAddrs = %v, want %v", addrs, wantAddrs)
+	}
+	for i := range wantAddrs {
+		if addrs[i] != wantAddrs[i] {
+			t.Fatalf("NodeAddrs = %v, want %v", addrs, wantAddrs)
+		}
+	}
+}
+
+func TestLoadGatewayConfigOverrides(t *testing.T) {
+	clearConfigEnv(t)
+
+	t.Setenv("GATEWAY_NODES", "node1=127.0.0.1:50051")
+	t.Setenv("GATEWAY_VNODES", "64")
+	t.Setenv("GATEWAY_TIMEOUT", "3s")
+	t.Setenv("GATEWAY_RETRIES", "0")
+
+	cfg, err := config.LoadGatewayConfig()
+	if err != nil {
+		t.Fatalf("LoadGatewayConfig: %v", err)
+	}
+	if cfg.VNodes != 64 || cfg.Timeout != 3*time.Second || cfg.Retries != 0 {
+		t.Fatalf("overrides = %+v", cfg)
+	}
+}
+
+func TestLoadGatewayConfigRejectsMalformedNodes(t *testing.T) {
+	clearConfigEnv(t)
+
+	t.Setenv("GATEWAY_NODES", "not-a-peer,=nohost,node1=")
+
+	if _, err := config.LoadGatewayConfig(); err == nil {
+		t.Fatal("LoadGatewayConfig accepted a GATEWAY_NODES value with no valid entries")
 	}
 }
 

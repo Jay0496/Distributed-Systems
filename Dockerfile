@@ -15,6 +15,7 @@ COPY . .
 
 RUN CGO_ENABLED=1 go build -trimpath -o /out/server ./cmd/server
 RUN CGO_ENABLED=0 go build -trimpath -o /out/healthcheck ./cmd/healthcheck
+RUN CGO_ENABLED=0 go build -trimpath -o /out/gateway ./cmd/gateway
 
 # ---- runtime stage ---------------------------------------------------------
 FROM alpine:3.19
@@ -25,6 +26,7 @@ WORKDIR /app
 
 COPY --from=builder /out/server /app/server
 COPY --from=builder /out/healthcheck /app/healthcheck
+COPY --from=builder /out/gateway /app/gateway
 
 EXPOSE 50051 60051
 

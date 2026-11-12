@@ -38,9 +38,9 @@ type Server struct {
 	// startedAt is the process start time used by Stats uptime reporting.
 	startedAt time.Time
 
-	// authorizer is the task 10 authorization seam. It is allow-all only when
-	// authentication is disabled.
-	authorizer Authorizer
+	// authEnforced records that the process installed the bearer-token
+	// interceptors. CheckAuth requires it when AUTH_TOKEN is set.
+	authEnforced bool
 
 	// apply is the Raft Apply seam used by the write coordinator. Tests
 	// replace it to force definite and ambiguous commit outcomes.
@@ -84,9 +84,6 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 		staging:   newFragmentStaging(),
 		placer:    redundancy.NewPlacer(),
 		startedAt: time.Now(),
-	}
-	if cfg.AuthToken == "" {
-		srv.authorizer = allowAllAuthorizer{}
 	}
 	// The method value is bound after construction so Server can own the
 	// default apply implementation without a package-level helper.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -149,6 +150,85 @@ type Config struct {
 	Peers map[string]string
 }
 
+// Gateway defaults. GATEWAY_NODES is required and has no localhost fallback;
+// GATEWAY_VNODES controls the virtual-node count, GATEWAY_TIMEOUT bounds one
+// RPC attempt, and GATEWAY_RETRIES is the number of retries after the first
+// attempt.
+const (
+	DefaultGatewayVNodes  = 100
+	DefaultGatewayTimeout = 15 * time.Second
+	DefaultGatewayRetries = 3
+)
+
+// GatewayConfig holds the client configuration for cmd/gateway. Nodes maps a
+// node ID to its gRPC address and Order lists the IDs sorted so the consistent
+// hash ring is built deterministically.
+type GatewayConfig struct {
+	Nodes           map[string]string
+	Order           []string
+	VNodes          int
+	Timeout         time.Duration
+	Retries         int
+	Token           string
+	MaxMessageBytes int
+}
+
+// LoadGatewayConfig reads the gateway environment. GATEWAY_NODES is required
+// and must use the "id=host:port,..." form; there is deliberately no localhost
+// default so a container cannot silently dial the wrong host.
+func LoadGatewayConfig() (GatewayConfig, error) {
+	rawNodes := strings.TrimSpace(os.Getenv("GATEWAY_NODES"))
+	if rawNodes == "" {
+		return GatewayConfig{}, fmt.Errorf(
+			"GATEWAY_NODES is required (example: GATEWAY_NODES=node1=localhost:50051,node2=localhost:50052)")
+	}
+
+	nodes := ParsePeerMap(rawNodes)
+	if len(nodes) == 0 {
+		return GatewayConfig{}, fmt.Errorf(
+			"GATEWAY_NODES=%q contains no valid id=host:port entries (example: GATEWAY_NODES=node1=localhost:50051,node2=localhost:50052)",
+			rawNodes)
+	}
+
+	order := make([]string, 0, len(nodes))
+	for id := range nodes {
+		order = append(order, id)
+	}
+	sort.Strings(order)
+
+	return GatewayConfig{
+		Nodes:           nodes,
+		Order:           order,
+		VNodes:          intOr("GATEWAY_VNODES", DefaultGatewayVNodes),
+		Timeout:         durationOr("GATEWAY_TIMEOUT", DefaultGatewayTimeout),
+		Retries:         nonNegativeIntOr("GATEWAY_RETRIES", DefaultGatewayRetries),
+		Token:           strings.TrimSpace(os.Getenv("AUTH_TOKEN")),
+		MaxMessageBytes: intOr("MAX_MESSAGE_SIZE", DefaultMaxMessageSize),
+	}, nil
+}
+
+// NodeAddrs returns the configured gRPC addresses in deterministic order.
+// Callers that construct GatewayConfig directly may leave Order empty; the
+// addresses are then sorted by node ID.
+func (c GatewayConfig) NodeAddrs() []string {
+	order := c.Order
+	if len(order) == 0 {
+		order = make([]string, 0, len(c.Nodes))
+		for id := range c.Nodes {
+			order = append(order, id)
+		}
+		sort.Strings(order)
+	}
+
+	addrs := make([]string, 0, len(order))
+	for _, id := range order {
+		if addr := c.Nodes[id]; addr != "" {
+			addrs = append(addrs, addr)
+		}
+	}
+	return addrs
+}
+
 // Load reads the node configuration from environment variables.
 func Load() Config {
 	dataDir := envOr("DATA_DIR", "/data")
@@ -188,8 +268,8 @@ func Load() Config {
 		TLSCert:             os.Getenv("TLS_CERT_FILE"),
 		TLSKey:              os.Getenv("TLS_KEY_FILE"),
 		TLSCA:               os.Getenv("TLS_CA_FILE"),
-		BootstrapServers:    parsePeerMap(os.Getenv("BOOTSTRAP_SERVERS")),
-		Peers:               parsePeerMap(os.Getenv("PEERS")),
+		BootstrapServers:    ParsePeerMap(os.Getenv("BOOTSTRAP_SERVERS")),
+		Peers:               ParsePeerMap(os.Getenv("PEERS")),
 	}
 	return cfg
 }
@@ -284,6 +364,19 @@ func intOr(key string, fallback int) int {
 	return value
 }
 
+func nonNegativeIntOr(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value < 0 {
+		fmt.Fprintf(os.Stderr, "invalid %s %q, using %d\n", key, raw, fallback)
+		return fallback
+	}
+	return value
+}
+
 func durationOr(key string, fallback time.Duration) time.Duration {
 	raw := os.Getenv(key)
 	if raw == "" {
@@ -310,8 +403,11 @@ func uint64Or(key string, fallback uint64) uint64 {
 	return value
 }
 
-// parsePeerMap parses "id1=host:port,id2=host:port" into a map.
-func parsePeerMap(raw string) map[string]string {
+// ParsePeerMap parses "id1=host:port,id2=host:port" into a map. Entries that
+// are empty or lack both an ID and an address are ignored; malformed entries are
+// reported to stderr and skipped. The server uses it for PEERS and
+// BOOTSTRAP_SERVERS, and the gateway uses it for GATEWAY_NODES.
+func ParsePeerMap(raw string) map[string]string {
 	out := make(map[string]string)
 	for _, entry := range strings.Split(raw, ",") {
 		entry = strings.TrimSpace(entry)
