@@ -1,18 +1,24 @@
-package cluster
+package cluster_test
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	"distributed-kv-store/internal/cluster"
 	"distributed-kv-store/internal/storage"
 )
+
+type orphanFragmentKey struct {
+	stripeID   string
+	shardIndex int
+}
 
 type orphanTestStore struct {
 	storage.Store
 	refs    []storage.FragmentRef
 	metas   []storage.KeyMeta
-	deleted []statKey
+	deleted []orphanFragmentKey
 }
 
 func (s *orphanTestStore) ListFragments(string) ([]storage.FragmentRef, error) {
@@ -24,7 +30,7 @@ func (s *orphanTestStore) ListKeys() ([]storage.KeyMeta, error) {
 }
 
 func (s *orphanTestStore) DeleteFragment(stripeID string, shardIndex int) error {
-	s.deleted = append(s.deleted, statKey{stripeID: stripeID, shardIndex: shardIndex})
+	s.deleted = append(s.deleted, orphanFragmentKey{stripeID: stripeID, shardIndex: shardIndex})
 	return nil
 }
 
@@ -48,7 +54,7 @@ func TestOrphanSweeperDeletesUnreferencedOldFragment(t *testing.T) {
 	store := &orphanTestStore{refs: []storage.FragmentRef{{
 		StripeID: "gone", ShardIndex: 0, CreatedAt: now.Add(-time.Hour),
 	}}}
-	sweeper := NewOrphanSweeper(OrphanSweeperOptions{
+	sweeper := cluster.NewOrphanSweeper(cluster.OrphanSweeperOptions{
 		Store:       store,
 		SelfNode:    "node1",
 		GracePeriod: time.Minute,
@@ -70,7 +76,7 @@ func TestOrphanSweeperKeepsRecentFragment(t *testing.T) {
 	store := &orphanTestStore{refs: []storage.FragmentRef{{
 		StripeID: "in-flight", ShardIndex: 0, CreatedAt: now.Add(-time.Second),
 	}}}
-	sweeper := NewOrphanSweeper(OrphanSweeperOptions{
+	sweeper := cluster.NewOrphanSweeper(cluster.OrphanSweeperOptions{
 		Store:       store,
 		SelfNode:    "node1",
 		GracePeriod: time.Minute,
@@ -95,7 +101,7 @@ func TestOrphanSweeperKeepsReferencedFragment(t *testing.T) {
 		}},
 		metas: []storage.KeyMeta{orphanMeta("live", map[int]string{0: "node1"})},
 	}
-	sweeper := NewOrphanSweeper(OrphanSweeperOptions{
+	sweeper := cluster.NewOrphanSweeper(cluster.OrphanSweeperOptions{
 		Store:       store,
 		SelfNode:    "node1",
 		GracePeriod: time.Minute,
@@ -120,7 +126,7 @@ func TestOrphanSweeperDeletesFragmentPlacedOnAnotherNode(t *testing.T) {
 		}},
 		metas: []storage.KeyMeta{orphanMeta("moved", map[int]string{0: "node2"})},
 	}
-	sweeper := NewOrphanSweeper(OrphanSweeperOptions{
+	sweeper := cluster.NewOrphanSweeper(cluster.OrphanSweeperOptions{
 		Store:       store,
 		SelfNode:    "node1",
 		GracePeriod: time.Minute,
@@ -142,7 +148,7 @@ func TestOrphanSweeperSkipsWhenGuardVetoes(t *testing.T) {
 	store := &orphanTestStore{refs: []storage.FragmentRef{{
 		StripeID: "gone", ShardIndex: 0, CreatedAt: now.Add(-time.Hour),
 	}}}
-	sweeper := NewOrphanSweeper(OrphanSweeperOptions{
+	sweeper := cluster.NewOrphanSweeper(cluster.OrphanSweeperOptions{
 		Store:       store,
 		SelfNode:    "node1",
 		GracePeriod: time.Minute,
@@ -165,7 +171,7 @@ func TestOrphanSweeperKeepsFragmentAfterMetadataCommits(t *testing.T) {
 	store := &orphanTestStore{refs: []storage.FragmentRef{{
 		StripeID: "late", ShardIndex: 0, CreatedAt: now.Add(-time.Hour),
 	}}}
-	sweeper := NewOrphanSweeper(OrphanSweeperOptions{
+	sweeper := cluster.NewOrphanSweeper(cluster.OrphanSweeperOptions{
 		Store:       store,
 		SelfNode:    "node1",
 		GracePeriod: time.Minute,

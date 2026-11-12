@@ -255,27 +255,38 @@ you:
 
 Bash: `./scripts/test.sh --unit`, `--integration`, `--chaos`, `--bench`, `--keep`.
 
-The underlying commands are still available. Unit tests (no cluster needed):
+The underlying commands are still available. The fast suite covers unit tests
+and the in-process five-node integration suite, so no cluster is needed:
 
 ```powershell
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race ./...
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -count=1 ./...
 ```
 
-Integration tests (the script starts and waits for the Compose cluster):
+The chaos suite runs in-process and is tagged:
+
+```powershell
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 `
+  go test -race -tags=chaos -count=1 ./tests/chaos/...
+```
+
+Compose-backed checks (the script starts and waits for the cluster):
 
 ```powershell
 docker compose up -d --build
 docker run --rm --network distributed-systems_cluster-net -e AUTH_TOKEN `
   -v ${PWD}:/app -w /app golang:1.22 `
-  go test -tags=integration -v ./tests/...
+  go test -tags=integration -count=1 ./tests/integration/...
 ```
 
-`GATEWAY_NODES` may override the node addresses used by `tests/cluster_test.go`;
-when it is unset the five Compose defaults are used. The integration package is
-excluded from `go test ./...` by a build tag, so the default test command stays
-green without Docker Compose running. Details, the target layout, and the
-white-box exceptions are in [tests/README.md](tests/README.md); the full test
-matrix is in [docs/TESTING.md](docs/TESTING.md).
+`GATEWAY_NODES` may override the node addresses used by
+`tests/integration/cluster_test.go`; when it is unset the five Compose defaults
+are used. Only Compose-dependent files carry the `integration` tag, so the
+default test command stays green without Docker Compose running. The layout,
+build tags, shared harness, coverage matrix, and white-box exceptions are in
+[tests/README.md](tests/README.md); the full guide is in
+[docs/TESTING.md](docs/TESTING.md). Run `./scripts/check.ps1` (or
+`./scripts/check.sh`) for the full local build, vet, test, chaos, and format
+check suite; it runs entirely in Docker and needs no remote CI.
 
 ## Persistence
 

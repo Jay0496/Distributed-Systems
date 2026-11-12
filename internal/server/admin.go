@@ -277,12 +277,12 @@ func (s *Server) clusterHealth(ctx context.Context) (*pb.ClusterHealthResponse, 
 // healthFromState converts a cached detector entry to the wire shape.
 func healthFromState(state cluster.NodeState) *pb.NodeHealth {
 	health := &pb.NodeHealth{
-		NodeId:     state.NodeID,
-		GrpcAddr:   state.GRPCAddr,
-		Healthy:    state.Healthy,
-		Leader:     state.Leader,
-		Error:      state.LastError,
-		RaftState:  "",
+		NodeId:    state.NodeID,
+		GrpcAddr:  state.GRPCAddr,
+		Healthy:   state.Healthy,
+		Leader:    state.Leader,
+		Error:     state.LastError,
+		RaftState: "",
 	}
 	if !state.LastSeen.IsZero() {
 		health.LastSeenUnix = state.LastSeen.Unix()

@@ -1,4 +1,4 @@
-package cluster
+package cluster_test
 
 import (
 	"context"
@@ -7,28 +7,18 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"distributed-kv-store/internal/cluster"
 )
 
-func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("condition was not met before timeout")
-}
-
 func TestQueueDeduplicatesByStripeAndShard(t *testing.T) {
-	q := NewQueue(QueueOptions{Workers: 1, Capacity: 8, Jitter: func(d time.Duration) time.Duration { return d }}, nil)
+	q := cluster.NewQueue(cluster.QueueOptions{Workers: 1, Capacity: 8, Jitter: func(d time.Duration) time.Duration { return d }}, nil)
 	defer q.Close()
 
-	if err := q.Enqueue(Task{StripeID: "s1", ShardIndex: 1, Priority: PriorityReturning}); err != nil {
+	if err := q.Enqueue(cluster.Task{StripeID: "s1", ShardIndex: 1, Priority: cluster.PriorityReturning}); err != nil {
 		t.Fatalf("first enqueue: %v", err)
 	}
-	if err := q.Enqueue(Task{StripeID: "s1", ShardIndex: 1, Priority: PriorityReturning, Replace: true}); err != nil {
+	if err := q.Enqueue(cluster.Task{StripeID: "s1", ShardIndex: 1, Priority: cluster.PriorityReturning, Replace: true}); err != nil {
 		t.Fatalf("second enqueue: %v", err)
 	}
 	stats := q.Stats()
@@ -43,12 +33,12 @@ func TestQueueDeduplicatesByStripeAndShard(t *testing.T) {
 func TestQueueRunsByPriority(t *testing.T) {
 	var (
 		mu    sync.Mutex
-		order []Priority
+		order []cluster.Priority
 	)
 	// One worker is required for a strict global order: with multiple workers,
 	// two tasks can be popped in priority order but finish in either order.
-	q := NewQueue(QueueOptions{Workers: 1, Capacity: 8, Jitter: func(d time.Duration) time.Duration { return d }},
-		func(_ context.Context, task Task) error {
+	q := cluster.NewQueue(cluster.QueueOptions{Workers: 1, Capacity: 8, Jitter: func(d time.Duration) time.Duration { return d }},
+		func(_ context.Context, task cluster.Task) error {
 			mu.Lock()
 			order = append(order, task.Priority)
 			mu.Unlock()
@@ -57,13 +47,13 @@ func TestQueueRunsByPriority(t *testing.T) {
 	defer q.Close()
 	q.SetPaused(true)
 
-	if err := q.Enqueue(Task{StripeID: "low", ShardIndex: 0, Priority: PriorityReturning}); err != nil {
+	if err := q.Enqueue(cluster.Task{StripeID: "low", ShardIndex: 0, Priority: cluster.PriorityReturning}); err != nil {
 		t.Fatalf("enqueue returning: %v", err)
 	}
-	if err := q.Enqueue(Task{StripeID: "urgent", ShardIndex: 0, Priority: PriorityReadRepair}); err != nil {
+	if err := q.Enqueue(cluster.Task{StripeID: "urgent", ShardIndex: 0, Priority: cluster.PriorityReadRepair}); err != nil {
 		t.Fatalf("enqueue read repair: %v", err)
 	}
-	if err := q.Enqueue(Task{StripeID: "mid", ShardIndex: 0, Priority: PriorityDegraded}); err != nil {
+	if err := q.Enqueue(cluster.Task{StripeID: "mid", ShardIndex: 0, Priority: cluster.PriorityDegraded}); err != nil {
 		t.Fatalf("enqueue degraded: %v", err)
 	}
 	q.SetPaused(false)
@@ -75,23 +65,23 @@ func TestQueueRunsByPriority(t *testing.T) {
 	})
 	mu.Lock()
 	defer mu.Unlock()
-	if order[0] != PriorityReadRepair || order[1] != PriorityDegraded || order[2] != PriorityReturning {
+	if order[0] != cluster.PriorityReadRepair || order[1] != cluster.PriorityDegraded || order[2] != cluster.PriorityReturning {
 		t.Fatalf("order = %v, want read repair, degraded, returning", order)
 	}
 }
 
 func TestQueueOverflowDropsLowestPriority(t *testing.T) {
-	q := NewQueue(QueueOptions{Workers: 1, Capacity: 2, Jitter: func(d time.Duration) time.Duration { return d }}, nil)
+	q := cluster.NewQueue(cluster.QueueOptions{Workers: 1, Capacity: 2, Jitter: func(d time.Duration) time.Duration { return d }}, nil)
 	defer q.Close()
 	q.SetPaused(true)
 
-	if err := q.Enqueue(Task{StripeID: "a", ShardIndex: 0, Priority: PriorityReturning}); err != nil {
+	if err := q.Enqueue(cluster.Task{StripeID: "a", ShardIndex: 0, Priority: cluster.PriorityReturning}); err != nil {
 		t.Fatalf("enqueue a: %v", err)
 	}
-	if err := q.Enqueue(Task{StripeID: "b", ShardIndex: 0, Priority: PriorityReturning}); err != nil {
+	if err := q.Enqueue(cluster.Task{StripeID: "b", ShardIndex: 0, Priority: cluster.PriorityReturning}); err != nil {
 		t.Fatalf("enqueue b: %v", err)
 	}
-	if err := q.Enqueue(Task{StripeID: "urgent", ShardIndex: 0, Priority: PriorityReadRepair}); err != nil {
+	if err := q.Enqueue(cluster.Task{StripeID: "urgent", ShardIndex: 0, Priority: cluster.PriorityReadRepair}); err != nil {
 		t.Fatalf("enqueue urgent: %v", err)
 	}
 	stats := q.Stats()
@@ -104,21 +94,21 @@ func TestQueueOverflowDropsLowestPriority(t *testing.T) {
 
 	// The queue now holds one urgent and one returning entry; another
 	// returning task is not urgent enough to displace either.
-	if err := q.Enqueue(Task{StripeID: "c", ShardIndex: 0, Priority: PriorityReturning}); !errors.Is(err, ErrRepairQueueFull) {
+	if err := q.Enqueue(cluster.Task{StripeID: "c", ShardIndex: 0, Priority: cluster.PriorityReturning}); !errors.Is(err, cluster.ErrRepairQueueFull) {
 		t.Fatalf("enqueue c = %v, want ErrRepairQueueFull", err)
 	}
 }
 
 func TestQueueRetriesWithBackoff(t *testing.T) {
 	var attempts atomic.Int32
-	q := NewQueue(QueueOptions{
+	q := cluster.NewQueue(cluster.QueueOptions{
 		Workers:     1,
 		Capacity:    4,
 		MaxAttempts: 3,
 		BackoffBase: time.Millisecond,
 		BackoffMax:  5 * time.Millisecond,
 		Jitter:      func(d time.Duration) time.Duration { return d },
-	}, func(context.Context, Task) error {
+	}, func(context.Context, cluster.Task) error {
 		if attempts.Add(1) == 1 {
 			return errors.New("transient")
 		}
@@ -126,7 +116,7 @@ func TestQueueRetriesWithBackoff(t *testing.T) {
 	})
 	defer q.Close()
 
-	if err := q.Enqueue(Task{StripeID: "retry", ShardIndex: 0}); err != nil {
+	if err := q.Enqueue(cluster.Task{StripeID: "retry", ShardIndex: 0}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	waitFor(t, 2*time.Second, func() bool { return q.Stats().Completed == 1 })
@@ -140,19 +130,19 @@ func TestQueueRetriesWithBackoff(t *testing.T) {
 }
 
 func TestQueueMarksFailedAtAttemptLimit(t *testing.T) {
-	q := NewQueue(QueueOptions{
+	q := cluster.NewQueue(cluster.QueueOptions{
 		Workers:     1,
 		Capacity:    4,
 		MaxAttempts: 2,
 		BackoffBase: time.Millisecond,
 		BackoffMax:  time.Millisecond,
 		Jitter:      func(d time.Duration) time.Duration { return d },
-	}, func(context.Context, Task) error {
+	}, func(context.Context, cluster.Task) error {
 		return errors.New("permanent")
 	})
 	defer q.Close()
 
-	if err := q.Enqueue(Task{StripeID: "fail", ShardIndex: 0}); err != nil {
+	if err := q.Enqueue(cluster.Task{StripeID: "fail", ShardIndex: 0}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	waitFor(t, 2*time.Second, func() bool { return q.Stats().Failed == 1 })
@@ -163,8 +153,8 @@ func TestQueueMarksFailedAtAttemptLimit(t *testing.T) {
 
 func TestQueueConcurrentEnqueue(t *testing.T) {
 	var handled atomic.Int32
-	q := NewQueue(QueueOptions{Workers: 4, Capacity: 256, Jitter: func(d time.Duration) time.Duration { return d }},
-		func(context.Context, Task) error {
+	q := cluster.NewQueue(cluster.QueueOptions{Workers: 4, Capacity: 256, Jitter: func(d time.Duration) time.Duration { return d }},
+		func(context.Context, cluster.Task) error {
 			handled.Add(1)
 			return nil
 		})
@@ -176,7 +166,7 @@ func TestQueueConcurrentEnqueue(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_ = q.Enqueue(Task{StripeID: "concurrent", ShardIndex: i})
+			_ = q.Enqueue(cluster.Task{StripeID: "concurrent", ShardIndex: i})
 		}(i)
 	}
 	wg.Wait()
@@ -184,10 +174,10 @@ func TestQueueConcurrentEnqueue(t *testing.T) {
 }
 
 func TestQueueClosedRejectsNewWork(t *testing.T) {
-	q := NewQueue(QueueOptions{Workers: 1, Capacity: 1}, nil)
+	q := cluster.NewQueue(cluster.QueueOptions{Workers: 1, Capacity: 1}, nil)
 	q.Close()
 	q.Close()
-	if err := q.Enqueue(Task{StripeID: "late"}); !errors.Is(err, ErrRepairQueueClosed) {
+	if err := q.Enqueue(cluster.Task{StripeID: "late"}); !errors.Is(err, cluster.ErrRepairQueueClosed) {
 		t.Fatalf("enqueue after close = %v, want ErrRepairQueueClosed", err)
 	}
 }
