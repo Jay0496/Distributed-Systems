@@ -21,6 +21,7 @@ white-box exception list live in [tests/README.md](../tests/README.md).
 | Chaos | `go test -race -tags=chaos -count=1 ./tests/chaos/...` |
 | Compose checks | `go test -tags=integration -count=1 ./tests/integration/...` |
 | Flakiness check | `go test -race -count=3 ./tests/...` |
+| Full local check suite | `./scripts/check.ps1` or `./scripts/check.sh` |
 
 The script runner wraps cluster startup, health waiting, the pinned network name,
 and `AUTH_TOKEN`:
@@ -51,9 +52,10 @@ docker run --rm -v ${PWD}:/app -w /app golang:1.22 go build ./...
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 go vet ./...
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 go vet -tags=integration ./...
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 go vet -tags=chaos ./...
-docker run --rm -v ${PWD}:/app -w /app golang:1.22 gofmt -l .
 ```
 
+Use `./scripts/check.ps1` or `./scripts/check.sh` for the format check; a raw
+`gofmt -l .` reports CRLF false positives on a Windows checkout.
 `go vet ./...` skips files excluded by build tags, so the tagged vet commands are
 part of the acceptance run.
 
@@ -286,11 +288,27 @@ docker run --rm -v ${PWD}:/app -w /app golang:1.22 bash -c '
 Do not hand-edit `proto/storage.pb.go` or `proto/storage_grpc.pb.go`; keep proto
 changes additive.
 
-## CI
+## Local check suite
 
-`.github/workflows/ci.yml` installs Go 1.22 and `gcc`, then runs build, all three
-vet tag sets, the fast race suite, and a `gofmt` check. CI does not start
-Compose. CGO is required for `mattn/go-sqlite3`; do not disable it.
+The project does not use a GitHub-hosted workflow. GitHub Actions is free for
+public repositories, but an account-level billing lock prevents jobs from
+starting, so all checks run locally in Docker:
+
+```powershell
+./scripts/check.ps1
+./scripts/check.ps1 -SkipChaos
+```
+
+```bash
+./scripts/check.sh
+./scripts/check.sh --skip-chaos
+```
+
+The checks are build, the three vet tag sets, the fast race suite, the chaos
+suite, and a `gofmt` check. The format check copies the working tree into the
+container and normalizes CRLF first, so a Windows checkout does not report every
+untouched file. CGO is required for `mattn/go-sqlite3`; the `golang` image
+includes `gcc`, so do not disable it. The local checks do not start Compose.
 
 ## Known costs and troubleshooting
 
@@ -304,4 +322,6 @@ Compose. CGO is required for `mattn/go-sqlite3`; do not disable it.
 - `node1` failing to resolve means the test was not run on
   `distributed-systems_cluster-net`.
 - `gcc not found` means the container lacks build tools; keep CGO enabled.
-- A failed `gofmt -l .` output must be fixed with `gofmt -w`.
+- If the local format check reports files, run `gofmt -w` on them. On a Windows
+  checkout, use `scripts/check.ps1` rather than a raw `gofmt -l .`: the script
+  normalizes CRLF before checking.

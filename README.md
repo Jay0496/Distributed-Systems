@@ -284,8 +284,9 @@ are used. Only Compose-dependent files carry the `integration` tag, so the
 default test command stays green without Docker Compose running. The layout,
 build tags, shared harness, coverage matrix, and white-box exceptions are in
 [tests/README.md](tests/README.md); the full guide is in
-[docs/TESTING.md](docs/TESTING.md). CI runs build, vet, format, and the fast
-suite on every push and pull request.
+[docs/TESTING.md](docs/TESTING.md). Run `./scripts/check.ps1` (or
+`./scripts/check.sh`) for the full local build, vet, test, chaos, and format
+check suite; it runs entirely in Docker and needs no remote CI.
 
 ## Persistence
 

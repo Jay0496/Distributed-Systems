@@ -5,8 +5,9 @@ This directory is the first-class test suite. Production code lives under
 genuinely need unexported internals stay next to the code and are listed as
 exceptions below.
 
-The repository is Docker-first. No host Go installation is required; CI is a
-convenience mirror of the same commands.
+The repository is Docker-first. No host Go installation is required and no
+paid CI service is used. `scripts/check.ps1` / `scripts/check.sh` run the full
+local check suite in Docker.
 
 ## Layout
 
@@ -87,12 +88,17 @@ docker run --rm -v "${PWD}:/app" -w /app golang:1.22 go build ./...
 docker run --rm -v "${PWD}:/app" -w /app golang:1.22 go vet ./...
 docker run --rm -v "${PWD}:/app" -w /app golang:1.22 go vet -tags=integration ./...
 docker run --rm -v "${PWD}:/app" -w /app golang:1.22 go vet -tags=chaos ./...
-docker run --rm -v "${PWD}:/app" -w /app golang:1.22 gofmt -l .
+
+# Everything above plus tests, chaos, and a CRLF-safe gofmt check
+./scripts/check.ps1
+./scripts/check.sh
 ```
 
 The script runner wraps cluster lifecycle and auth:
 
 ```powershell
+./scripts/check.ps1                # local build/vet/test/format checks
+./scripts/check.ps1 -SkipChaos     # faster local check
 ./scripts/test.ps1                 # fast suite
 ./scripts/test.ps1 -Integration    # starts Compose, runs tagged checks
 ./scripts/test.ps1 -Chaos          # chaos-tagged suite
@@ -222,18 +228,34 @@ import `tests/support` freely.
   restart hang.
 - Tests create unique keys, so repeated runs do not collide.
 
-## CI
+## Local checks
 
-`.github/workflows/ci.yml` runs on every push and pull request:
+There is no GitHub-hosted workflow. GitHub Actions is normally free for public
+repositories, but an account-level billing lock prevents jobs from starting, so
+the project keeps its checks local and free:
+
+```powershell
+./scripts/check.ps1
+./scripts/check.ps1 -SkipChaos
+```
+
+```bash
+./scripts/check.sh
+./scripts/check.sh --skip-chaos
+```
+
+The scripts run in `golang:1.22` Docker and perform:
 
 1. build;
 2. vet the default, `integration`, and `chaos` tag sets;
 3. fast tests with `-race`;
-4. a formatting check.
+4. chaos tests with `-race`;
+5. a `gofmt` check over a CRLF-normalized copy of the working tree, so Windows
+   checkouts do not produce false failures.
 
-CGO and `gcc` are required for `mattn/go-sqlite3`; CI installs build tools and
-does not disable CGO. The project remains Docker-first, and CI does not start
-Compose.
+CGO and `gcc` are included in the `golang` image; do not disable CGO for SQLite
+tests. The scripts do not start Compose. Use `scripts/test.ps1 -Integration`
+when a live cluster is available.
 
 ## Troubleshooting
 
@@ -245,4 +267,4 @@ Compose.
 | `database is locked` | A SQLite store was not closed before restart. Always close stores in `t.Cleanup`; the harness does this. |
 | `cgo: C compiler "gcc" not found` | Install `gcc` in the container/host; do not set `CGO_ENABLED=0` for SQLite tests. |
 | Auth tests fail with `Unauthenticated` | Pass the same `AUTH_TOKEN` to the test container and the cluster, or use the in-process auth harness. |
-| CI format job fails | Run `gofmt -w` on the changed files; generated protobuf files are already formatted. |
+| Local format check fails | Run `gofmt -w` on the files it lists; generated protobuf files are already formatted. |
