@@ -35,12 +35,20 @@ func run(args []string) error {
 		if len(args) != 3 {
 			return errors.New("put requires a key and value")
 		}
-		return executePut(gateway.NewRouter(100).GetNode(args[1]), args[1], args[2], "")
+		node, err := entryNode(args[1])
+		if err != nil {
+			return err
+		}
+		return executePut(node, args[1], args[2], "")
 	case "get":
 		if len(args) != 2 {
 			return errors.New("get requires a key")
 		}
-		return executeGet(gateway.NewRouter(100).GetNode(args[1]), args[1])
+		node, err := entryNode(args[1])
+		if err != nil {
+			return err
+		}
+		return executeGet(node, args[1])
 	case "mode":
 		if len(args) != 2 {
 			return errors.New("mode requires replication or rs32")
@@ -56,6 +64,23 @@ func run(args []string) error {
 
 func usage() string {
 	return "Usage:\n  go run ./cmd/gateway put <key> <val>\n  go run ./cmd/gateway get <key>\n  go run ./cmd/gateway mode <replication|rs32>"
+}
+
+// entryNode is the transitional entry-node lookup for commit 1. Commit 2
+// replaces it with the env-configured gateway client.
+func entryNode(key string) (string, error) {
+	router := gateway.NewRouter([]string{
+		"localhost:50051",
+		"localhost:50052",
+		"localhost:50053",
+		"localhost:50054",
+		"localhost:50055",
+	}, 100)
+	node, ok := router.GetNode(key)
+	if !ok {
+		return "", errors.New("no gateway nodes configured")
+	}
+	return node, nil
 }
 
 func executePut(addr, key, value, mode string) error {
