@@ -68,6 +68,39 @@
 // failures. ReadVerified exposes the same gather/decode/verify path to the task
 // 09 repairer without enqueuing repair or writing metadata.
 //
+// # Admin surface
+//
+// GetConfig, SetConfig, Delete, and ClusterHealth are leader-coordinated.
+// Followers forward through the same one-hop guard as Put and Get. GetConfig
+// applies get_config through Raft so it observes every committed configuration
+// change. SetConfig validates a concrete rs32 or replication mode, commits
+// set_config, and returns the committed value. A request mode still overrides
+// the global default.
+//
+// Delete commits delete_meta with the optional expected version atomically.
+// Metadata removal always happens before fragment deletion; the returned old
+// Placement then drives best-effort DeleteStripeFragments calls on every owner.
+// A missing key is idempotent (success=true, found=false), and a version
+// mismatch is Aborted.
+//
+// Stats is local-only and may be answered by any node. It reports key, stripe,
+// and fragment counts from the store, SQLite+WAL+SHM bytes, the locally applied
+// mode, the leader flag, and uptime. Repair counters and queue depth are zero
+// until task 09 installs the shared repair queue.
+//
+// ClusterHealth is leader-only because only the leader has the complete Raft
+// configuration. It probes every voter in parallel with NodeStatus and Stats
+// under CLUSTER_PROBE_TIMEOUT (default 1s). A node is healthy only when both
+// queries succeed. The response is degraded when any node is unhealthy or any
+// committed key is marked degraded. This on-demand probing is intentionally
+// simple; task 09 replaces it with a cached background detector and this
+// handler will read the cache.
+//
+// Authorizer is the task 10 seam. The allow-all implementation is installed only
+// when AUTH_TOKEN is empty; CheckAuth refuses to start an authenticated server
+// without an authorizer. Internal clients use internal/rpc.DialOptions to attach
+// the bearer token and the configured message limit.
+//
 // # Fragment transport v2
 //
 // Fragments are addressed by the pair (stripe_id, shard_index). The stripe ID
