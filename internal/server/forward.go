@@ -59,17 +59,28 @@ func dialFuncFor(cfg config.Config, dialContext func(context.Context, string, []
 	}
 }
 
-// getConn returns a cached connection to target, dialing if necessary.
+// getConn returns a cached connection to target, dialing if necessary. The
+// cache lock is not held while dialing: a slow or unreachable peer must not
+// block dials to other peers. Concurrent first calls may dial the same target;
+// the loser's connection is closed and the cached winner is returned.
 func (s *Server) getConn(ctx context.Context, target string) (*grpc.ClientConn, error) {
 	s.connMu.Lock()
-	defer s.connMu.Unlock()
-
 	if conn, ok := s.conns[target]; ok {
+		s.connMu.Unlock()
 		return conn, nil
 	}
+	s.connMu.Unlock()
+
 	conn, err := s.dial(ctx, target)
 	if err != nil {
 		return nil, err
+	}
+
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if existing, ok := s.conns[target]; ok {
+		_ = conn.Close()
+		return existing, nil
 	}
 	s.conns[target] = conn
 	return conn, nil
