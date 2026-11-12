@@ -13,20 +13,23 @@ RUN go mod download
 
 COPY . .
 
+# The server links SQLite through CGO. The CLI tools are pure Go so they can be
+# built with CGO disabled and start without the SQLite shared library.
 RUN CGO_ENABLED=1 go build -trimpath -o /out/server ./cmd/server
-RUN CGO_ENABLED=0 go build -trimpath -o /out/healthcheck ./cmd/healthcheck
 RUN CGO_ENABLED=0 go build -trimpath -o /out/gateway ./cmd/gateway
+RUN CGO_ENABLED=0 go build -trimpath -o /out/healthcheck ./cmd/healthcheck
+RUN CGO_ENABLED=0 go build -trimpath -o /out/bench ./cmd/bench
 
 # ---- runtime stage ---------------------------------------------------------
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates libgcc
+# libgcc is needed by the CGO server binary. The sqlite CLI lets operators
+# inspect /data/node.db from inside a node container without extra tooling.
+RUN apk add --no-cache ca-certificates libgcc sqlite
 
 WORKDIR /app
 
-COPY --from=builder /out/server /app/server
-COPY --from=builder /out/healthcheck /app/healthcheck
-COPY --from=builder /out/gateway /app/gateway
+COPY --from=builder /out/ /app/
 
 EXPOSE 50051 60051
 

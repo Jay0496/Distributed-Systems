@@ -1,7 +1,9 @@
+name: distributed-systems
+
 x-common-env: &common-env
   DATA_DIR: /data
   PEERS: node1=node1:50051,node2=node2:50052,node3=node3:50053,node4=node4:50054,node5=node5:50055
-  # Empty disables auth. Set the same value for the cluster and the gateway.
+  # Empty disables auth. Set the same value for every node and every tool.
   AUTH_TOKEN: ${AUTH_TOKEN:-}
   MAX_MESSAGE_SIZE: ${MAX_MESSAGE_SIZE:-33554432}
 
@@ -10,9 +12,23 @@ x-healthcheck: &healthcheck
   timeout: 3s
   retries: 12
 
+# Shared node definition. Every service builds the same image and runs on the
+# pinned Compose network. The tools profile overrides the entrypoint.
+x-node: &node
+  build:
+    context: .
+  restart: unless-stopped
+  stop_grace_period: 30s
+  networks:
+    - cluster-net
+  logging:
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   node1:
-    build: .
+    <<: *node
     container_name: node1
     ports:
       - "50051:50051"
@@ -26,14 +42,15 @@ services:
       RAFT_PORT: "60051"
       BOOTSTRAP: "true"
       BOOTSTRAP_SERVERS: node1=node1:60051,node2=node2:60052,node3=node3:60053,node4=node4:60054,node5=node5:60055
-    networks:
-      - cluster-net
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "/app/healthcheck", "-addr", "localhost:50051"]
 
+  # node2-node5 deliberately have no depends_on. The bootstrap configuration on
+  # node1 lists every voter and Raft retries until peers appear, so startup
+  # order no longer matters.
   node2:
-    build: .
+    <<: *node
     container_name: node2
     ports:
       - "50052:50052"
@@ -46,17 +63,12 @@ services:
       PORT: "50052"
       RAFT_PORT: "60052"
       BOOTSTRAP: "false"
-    networks:
-      - cluster-net
-    depends_on:
-      node1:
-        condition: service_healthy
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "/app/healthcheck", "-addr", "localhost:50052"]
 
   node3:
-    build: .
+    <<: *node
     container_name: node3
     ports:
       - "50053:50053"
@@ -69,17 +81,12 @@ services:
       PORT: "50053"
       RAFT_PORT: "60053"
       BOOTSTRAP: "false"
-    networks:
-      - cluster-net
-    depends_on:
-      node1:
-        condition: service_healthy
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "/app/healthcheck", "-addr", "localhost:50053"]
 
   node4:
-    build: .
+    <<: *node
     container_name: node4
     ports:
       - "50054:50054"
@@ -92,17 +99,12 @@ services:
       PORT: "50054"
       RAFT_PORT: "60054"
       BOOTSTRAP: "false"
-    networks:
-      - cluster-net
-    depends_on:
-      node1:
-        condition: service_healthy
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "/app/healthcheck", "-addr", "localhost:50054"]
 
   node5:
-    build: .
+    <<: *node
     container_name: node5
     ports:
       - "50055:50055"
@@ -115,33 +117,41 @@ services:
       PORT: "50055"
       RAFT_PORT: "60055"
       BOOTSTRAP: "false"
-    networks:
-      - cluster-net
-    depends_on:
-      node1:
-        condition: service_healthy
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "/app/healthcheck", "-addr", "localhost:50055"]
 
-  # One-shot CLI tool. It is not started by default; use:
+  # One-shot CLI tools. They are not started by `docker compose up`; use the
+  # scripts or:
   #   docker compose run --rm gateway put demo-key hello --mode rs32
+  #   docker compose run --rm bench --help
   gateway:
-    build: .
+    <<: *node
     profiles: ["tools"]
+    restart: "no"
     entrypoint: ["/app/gateway"]
     environment:
+      <<: *common-env
       GATEWAY_NODES: node1=node1:50051,node2=node2:50052,node3=node3:50053,node4=node4:50054,node5=node5:50055
-      AUTH_TOKEN: ${AUTH_TOKEN:-}
-      MAX_MESSAGE_SIZE: ${MAX_MESSAGE_SIZE:-33554432}
-    networks:
-      - cluster-net
-    depends_on:
-      node1:
-        condition: service_healthy
+      GATEWAY_VNODES: ${GATEWAY_VNODES:-100}
+      GATEWAY_TIMEOUT: ${GATEWAY_TIMEOUT:-15s}
+      GATEWAY_RETRIES: ${GATEWAY_RETRIES:-3}
+
+  bench:
+    <<: *node
+    profiles: ["tools"]
+    restart: "no"
+    entrypoint: ["/app/bench"]
+    environment:
+      <<: *common-env
+      GATEWAY_NODES: node1=node1:50051,node2=node2:50052,node3=node3:50053,node4=node4:50054,node5=node5:50055
+      GATEWAY_VNODES: ${GATEWAY_VNODES:-100}
+      GATEWAY_TIMEOUT: ${GATEWAY_TIMEOUT:-15s}
+      GATEWAY_RETRIES: ${GATEWAY_RETRIES:-3}
 
 networks:
   cluster-net:
+    name: distributed-systems_cluster-net
     driver: bridge
 
 volumes:

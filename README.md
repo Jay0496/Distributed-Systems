@@ -45,6 +45,7 @@ state layout, and recovery behaviour. Design trade-offs are recorded in
 | `cmd/gateway/` | CLI entrypoint: gateway configuration, client construction, command dispatch |
 | `cmd/healthcheck/` | Tiny binary used by Docker Compose health checks |
 | `cmd/bench/` | Benchmark harness placeholder |
+| `scripts/` | PowerShell and bash wrappers for up, down, reset, demo, test, and bench |
 | `internal/config/` | Environment configuration parsing |
 | `internal/server/` | gRPC handlers: `Put`, `Get`, `Heartbeat`, `Join`, `NodeStatus`, fragments, repair, admin, auth |
 | `internal/server/forward.go` | Leader discovery, cached client connections, one-hop forwarding, retry and loop guard |
@@ -85,26 +86,86 @@ state layout, and recovery behaviour. Design trade-offs are recorded in
 | `TLS_ENABLED` | `false` | Enable TLS on the gRPC server and forwarding clients |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | empty | Server certificate and key |
 | `TLS_CA_FILE` | empty | CA used by forwarding clients to verify peers |
+| `AUTH_TOKEN` | empty | Shared bearer token for all nodes and tools; empty disables auth with a startup warning |
 
 ## Quick start
+
+Prerequisites: Docker Engine or Docker Desktop with the Compose v2 plugin.
+Go is **not** required on the host. The bash scripts use `jq` when available and
+fall back to `docker inspect` when it is not.
+
+Windows PowerShell:
+
+```powershell
+./scripts/up.ps1
+./scripts/demo.ps1
+./scripts/down.ps1
+```
+
+Bash (WSL, Git Bash, macOS, Linux):
+
+```bash
+./scripts/up.sh
+./scripts/demo.sh
+./scripts/down.sh
+```
+
+`up` builds the image, starts node1-node5 in the background, waits for all five
+health checks, and prints `docker compose ps` plus `gateway status`. It exits
+non-zero if any node is unhealthy or the cluster stays degraded.
+
+The raw Compose command still works:
 
 ```powershell
 docker compose up --build -d
 docker compose ps
 ```
 
-All five containers should report `healthy`. Check the cluster:
-
-```powershell
-docker compose logs node1 | Select-String "entering leader state"
-```
-
-Kill the cluster:
+All five containers should report `healthy`. Kill the cluster:
 
 ```powershell
 docker compose down        # keeps data
 docker compose down -v     # deletes data volumes
 ```
+
+Prefer the scripts: `down` preserves volumes by default, while `reset`
+explicitly deletes them.
+
+## Deployment scripts
+
+| Script | Purpose | Key flags |
+| --- | --- | --- |
+| `scripts/up.ps1` / `up.sh` | Build, start, wait for health, print status | `-Timeout` / `--timeout`, `-Help` / `--help` |
+| `scripts/down.ps1` / `down.sh` | Stop the cluster; keep volumes by default | `-Volumes` / `--volumes` |
+| `scripts/reset.ps1` / `reset.sh` | Destructive reset: containers, network, and all five volumes | `-Build` / `--build` |
+| `scripts/demo.ps1` / `demo.sh` | End-to-end RS/replication, failure, repair, and delete demo | `-Mode`, `-SkipFailure`, `-Keep`, `-ValueSize` |
+| `scripts/test.ps1` / `test.sh` | Unit, integration, chaos, and bench suites in Docker | `-Integration`, `-Chaos`, `-Bench`, `-Keep` |
+| `scripts/bench.ps1` / `bench.sh` | Forward arguments to the bench tool (placeholder until task 13) | any bench flags |
+
+Every script supports `-Help` / `--help`, resolves the repository root from its
+own location, and prints the command it runs. `test` and `demo` start the cluster
+only when needed and tear down only a cluster they started; pass `-Keep` /
+`--keep` to leave it running.
+
+The Compose project name is pinned to `distributed-systems`, so the network is
+always `distributed-systems_cluster-net` and the volumes are named
+`distributed-systems_node1-data` through `distributed-systems_node5-data` (the
+runtime alias is `node1-data` ... `node5-data` inside the project). If you used
+an earlier checkout with a different project name, run `docker volume ls` and
+either rename the old volumes or start clean with `./scripts/reset.ps1`.
+
+The gateway and bench tools live in the Compose `tools` profile. They are not
+started by `up`; call them through `docker compose run --rm`, the scripts, or:
+
+```powershell
+docker compose run --rm gateway status
+docker compose run --rm bench --help
+```
+
+If `AUTH_TOKEN` is set on the host, Compose passes it to all five nodes, the
+gateway, the bench tool, and the integration test container. The scripts print
+only `auth: enabled` or `auth: disabled` and never echo the token.
+
 
 ## Gateway CLI
 
@@ -181,25 +242,40 @@ through Raft. Reads gather enough verified shards to reconstruct the value. See
 
 ## Tests
 
-Unit tests (no cluster needed):
+Use the script runner so the cluster lifecycle and network name are handled for
+you:
+
+```powershell
+./scripts/test.ps1                 # unit and component tests in Docker
+./scripts/test.ps1 -Integration    # starts the cluster, waits, runs integration
+./scripts/test.ps1 -Chaos          # chaos-tagged failure suite
+./scripts/test.ps1 -Bench          # benchmark-tagged suite (placeholder)
+./scripts/test.ps1 -Integration -Keep
+```
+
+Bash: `./scripts/test.sh --unit`, `--integration`, `--chaos`, `--bench`, `--keep`.
+
+The underlying commands are still available. Unit tests (no cluster needed):
 
 ```powershell
 docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race ./...
 ```
 
-Integration tests (require a running Compose cluster):
+Integration tests (the script starts and waits for the Compose cluster):
 
 ```powershell
 docker compose up -d --build
-docker run --rm --network distributed-systems_cluster-net -v ${PWD}:/app -w /app golang:1.22 `
+docker run --rm --network distributed-systems_cluster-net -e AUTH_TOKEN `
+  -v ${PWD}:/app -w /app golang:1.22 `
   go test -tags=integration -v ./tests/...
 ```
 
-The integration package is excluded from `go test ./...` by a build tag, so the
-default test command stays green without Docker Compose running. Details, the
-target layout, and the white-box exceptions are in
-[tests/README.md](tests/README.md); the full test matrix is in
-[docs/TESTING.md](docs/TESTING.md).
+`GATEWAY_NODES` may override the node addresses used by `tests/cluster_test.go`;
+when it is unset the five Compose defaults are used. The integration package is
+excluded from `go test ./...` by a build tag, so the default test command stays
+green without Docker Compose running. Details, the target layout, and the
+white-box exceptions are in [tests/README.md](tests/README.md); the full test
+matrix is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Persistence
 
@@ -228,17 +304,20 @@ stop the node and remove `node.db` and its `-wal`/`-shm` files.
 
 | Symptom | Likely cause / fix |
 | --- | --- |
-| Integration tests cannot resolve `node1` | Run them on `distributed-systems_cluster-net`: `docker run --rm --network distributed-systems_cluster-net ...` |
+| `scripts/up.ps1` or `up.sh` times out | Run `docker compose ps` and `docker compose logs --tail 100 node1`; check for port conflicts and give startup more time with `-Timeout` / `--timeout` |
+| `docker compose (v2) is unavailable` | Install the Compose plugin; scripts require `docker compose`, not `docker-compose` |
+| Integration tests cannot resolve `node1` | Use `./scripts/test.ps1 -Integration` or run them on `distributed-systems_cluster-net` |
+| Data disappeared after changing the checkout directory name | The project name is pinned; inspect `docker volume ls` and migrate or reset |
 | `create bolt store: timeout` at startup | Another process still holds `/data/raft.db`; stop the old container before starting a new one |
 | No leader, election loops | `BOOTSTRAP_SERVERS` must list the whole cluster and be identical on the bootstrapping node; only one node may set `BOOTSTRAP=true` |
 | Writes return "not the leader" | `PEERS` is missing or has the wrong gRPC addresses, so the follower cannot forward |
 | Followers never catch up | Check Raft connectivity on ports 60051-60055 and `docker compose logs nodeN` |
 | Health check keeps failing | The process is not serving on the gRPC port; inspect container logs |
+| `AUTH_TOKEN` errors after changing the host value | Restart the whole cluster and tools so every container sees the same token |
 
 ## Roadmap
 
-- Wire the CLI/gateway routing layer to the gRPC API.
-- Move the Raft log to metadata-only commands and integrate the fragment write/read path.
-- Integrate the implemented RS(3,2)/five-copy engines into the fragment
-  write/read path and implement real repair in `internal/server/fragments.go`.
-- Add certificate provisioning for the optional TLS mode.
+- Expand the benchmark harness and record storage/throughput medians.
+- Complete the documentation set and requirements mapping.
+- Final integration cleanup and release rehearsal.
+- Add certificate provisioning for the optional TLS mode (future work).
