@@ -204,6 +204,28 @@ What the tests assert:
    forwarding) and returns a stripe ID and version. Reads through a follower
    exercise forwarding in the other direction.
 
+## Chaos tests
+
+The chaos suite runs an in-process five-node cluster with real Raft transports,
+real SQLite stores, controllable gRPC listeners, a leader-gated detector, and
+the production repairer. It is compiled with the `chaos` build tag.
+
+```powershell
+docker run --rm -v ${PWD}:/app -w /app golang:1.22 go test -race -tags=chaos -count=1 ./tests/chaos
+```
+
+Coverage:
+
+- one and two unreachable nodes while reads and writes continue;
+- losing quorum when the leader and two followers stop;
+- node stop/restart with missing fragments and automatic refill;
+- corrupt-shard replacement through the forced `Repair` RPC;
+- a partition that degrades health and recovers after repair;
+- metadata-only fragment loss repaired back to five placements.
+
+The suite uses short detector intervals (`100ms`) and failure thresholds (`1`) so
+it finishes in seconds; production defaults are much less aggressive.
+
 ## Manual verification checklist
 
 The checks below cover behaviour the automated tests cannot easily express
