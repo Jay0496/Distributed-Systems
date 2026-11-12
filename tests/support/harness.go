@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"distributed-kv-store/internal/cluster"
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/consensus"
 	"distributed-kv-store/internal/server"
@@ -20,6 +21,8 @@ import (
 	"github.com/hashicorp/raft"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -37,6 +40,10 @@ type Cluster struct {
 
 	mu          sync.RWMutex
 	unreachable map[string]bool
+
+	failure       bool
+	failureCtx    context.Context
+	failureCancel context.CancelFunc
 
 	closeOnce sync.Once
 }
@@ -102,6 +109,10 @@ func StartCluster(t testing.TB, count int) *Cluster {
 		c.mu.RLock()
 		down := c.unreachable[target]
 		n, ok := c.byID[target]
+		var listener *bufconn.Listener
+		if ok {
+			listener = n.lis
+		}
 		c.mu.RUnlock()
 		if down {
 			return nil, fmt.Errorf("support: node %s is unreachable", target)
@@ -109,9 +120,12 @@ func StartCluster(t testing.TB, count int) *Cluster {
 		if !ok {
 			return nil, fmt.Errorf("support: unknown peer %q", target)
 		}
+		if listener == nil {
+			return nil, fmt.Errorf("support: node %s is stopped", target)
+		}
 		return grpc.DialContext(ctx, "bufnet",
 			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-				return n.lis.DialContext(ctx)
+				return listener.DialContext(ctx)
 			}),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithBlock(),
@@ -152,6 +166,7 @@ func StartCluster(t testing.TB, count int) *Cluster {
 			grpc.MaxSendMsgSize(cfg.MaxMessageSize),
 		)
 		pb.RegisterStorageServiceServer(n.grpcSrv, n.Server)
+		registerTestHealth(n.grpcSrv)
 
 		go func(srv *grpc.Server, lis *bufconn.Listener) {
 			_ = srv.Serve(lis)
@@ -170,7 +185,14 @@ func StartCluster(t testing.TB, count int) *Cluster {
 		for id := range c.byID {
 			c.unreachable[id] = true
 		}
+		cancel := c.failureCancel
+		c.failure = false
+		c.failureCtx = nil
+		c.failureCancel = nil
 		c.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 
 		for _, n := range c.Nodes {
 			if n.grpcSrv != nil {
@@ -201,6 +223,68 @@ func StartCluster(t testing.TB, count int) *Cluster {
 		t.Fatalf("support: %v", err)
 	}
 	return c
+}
+
+// EnableFailureManagement starts a leader-gated detector and repairer on every
+// node. Interval, failure, and success thresholds are short so chaos tests can
+// observe transitions without waiting for production defaults.
+func (c *Cluster) EnableFailureManagement(t testing.TB) {
+	t.Helper()
+
+	c.mu.Lock()
+	if c.failure {
+		c.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.failure = true
+	c.failureCtx = ctx
+	c.failureCancel = cancel
+	c.mu.Unlock()
+
+	for _, n := range c.Nodes {
+		c.attachFailureManagement(t, n, ctx)
+	}
+}
+
+func (c *Cluster) attachFailureManagement(t testing.TB, n *Node, ctx context.Context) {
+	t.Helper()
+	if n == nil || n.Server == nil || n.Raft == nil {
+		return
+	}
+
+	nodes := make(map[string]string, len(c.Peers))
+	for id, addr := range c.Peers {
+		nodes[id] = addr
+	}
+	detector := cluster.NewDetector(cluster.DetectorOptions{
+		Interval:  100 * time.Millisecond,
+		Timeout:   250 * time.Millisecond,
+		Failures:  1,
+		Successes: 1,
+		Nodes:     nodes,
+		SelfNode:  n.ID,
+		Probe:     n.Server.ProbePeer,
+		IsLeader:  func() bool { return n.Raft != nil && n.Raft.Raft.State() == raft.Leader },
+		LeaderCh:  n.Raft.Raft.LeaderCh(),
+	})
+	if repairer := n.Server.Repairer(); repairer != nil {
+		repairer.SetOrphanSweeper(cluster.NewOrphanSweeper(cluster.OrphanSweeperOptions{
+			Store:       n.Store,
+			SelfNode:    n.ID,
+			GracePeriod: 200 * time.Millisecond,
+		}))
+	}
+	n.Server.AttachFailureManagement(ctx, detector)
+}
+
+// registerTestHealth attaches the standard gRPC health service so detector
+// probes work exactly as they do in production.
+func registerTestHealth(srv *grpc.Server) {
+	hs := health.NewServer()
+	hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	hs.SetServingStatus("storage.StorageService", healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(srv, hs)
 }
 
 // SetUnreachable makes the named nodes fail every outbound dial, so fragments
@@ -275,9 +359,12 @@ func (c *Cluster) StopNode(t testing.TB, id string) {
 		}
 		n.Store = nil
 	}
-	if n.lis != nil {
-		_ = n.lis.Close()
-		n.lis = nil
+	c.mu.Lock()
+	lis := n.lis
+	n.lis = nil
+	c.mu.Unlock()
+	if lis != nil {
+		_ = lis.Close()
 	}
 	n.Server = nil
 }
@@ -316,15 +403,19 @@ func (c *Cluster) StartNode(t testing.TB, id string) {
 	}.WithDefaults()
 	n.Server = server.New(cfg, store, raftNode, c.dial)
 
-	n.lis = bufconn.Listen(clusterBufSize)
+	lis := bufconn.Listen(clusterBufSize)
+	c.mu.Lock()
+	n.lis = lis
+	c.mu.Unlock()
 	n.grpcSrv = grpc.NewServer(
 		grpc.MaxRecvMsgSize(cfg.MaxMessageSize),
 		grpc.MaxSendMsgSize(cfg.MaxMessageSize),
 	)
 	pb.RegisterStorageServiceServer(n.grpcSrv, n.Server)
-	go func(srv *grpc.Server, lis *bufconn.Listener) {
-		_ = srv.Serve(lis)
-	}(n.grpcSrv, n.lis)
+	registerTestHealth(n.grpcSrv)
+	go func(srv *grpc.Server, listener *bufconn.Listener) {
+		_ = srv.Serve(listener)
+	}(n.grpcSrv, lis)
 
 	conn, err := c.dial(context.Background(), n.ID)
 	if err != nil {
@@ -332,6 +423,23 @@ func (c *Cluster) StartNode(t testing.TB, id string) {
 	}
 	n.Conn = conn
 	n.Client = pb.NewStorageServiceClient(conn)
+
+	// bufconn listeners are recreated on restart, so previously cached client
+	// connections point at a closed listener. Drop outbound caches to model a
+	// TCP client reconnecting to the same address.
+	for _, other := range c.Nodes {
+		if other.Server != nil {
+			other.Server.DropConnections()
+		}
+	}
+
+	c.mu.RLock()
+	failure := c.failure
+	failureCtx := c.failureCtx
+	c.mu.RUnlock()
+	if failure && failureCtx != nil {
+		c.attachFailureManagement(t, n, failureCtx)
+	}
 }
 
 // WaitLeader waits for exactly one node to report itself leader.
