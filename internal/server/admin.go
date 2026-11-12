@@ -51,6 +51,95 @@ func (s *Server) SetConfig(ctx context.Context, req *pb.SetConfigRequest) (*pb.C
 	return s.setConfig(mode)
 }
 
+// Delete removes a key's metadata through Raft and then garbage-collects the
+// stripe's fragments on their owners. Metadata always commits first. A missing
+// key is idempotent and reports found=false. Followers forward to the leader.
+func (s *Server) Delete(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
+	if err := validateKey(req.GetKey()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if req.GetExpectedVersion() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "expected_version must not be negative")
+	}
+	if s.node == nil || s.node.Raft == nil {
+		return nil, status.Error(codes.Internal, "raft node is not configured")
+	}
+	if s.node.Raft.State() != raft.Leader {
+		return s.forwardDelete(ctx, req)
+	}
+	return s.deleteKey(req)
+}
+
+// deleteKey applies delete_meta on the leader and only then removes fragments.
+// The FSM returns the full old metadata atomically with the version check, so
+// a concurrent write cannot slip between the check and the delete.
+func (s *Server) deleteKey(req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
+	data, err := marshalCommand(consensus.Command{
+		Op:      consensus.OpDeleteMeta,
+		Key:     req.GetKey(),
+		Version: req.GetExpectedVersion(),
+	})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	response, err := s.apply(data, s.cfg.WriteTimeout)
+	if err != nil {
+		return nil, adminStatusError("delete metadata", err)
+	}
+	result, ok := response.(*consensus.Result)
+	if !ok || result == nil {
+		return nil, status.Errorf(codes.Internal, "unexpected delete_meta response %T", response)
+	}
+	if result.Err != "" {
+		if result.Err == consensus.ResultErrConflict {
+			return nil, status.Errorf(codes.Aborted, "key %q version does not match expected_version %d", req.GetKey(), req.GetExpectedVersion())
+		}
+		return nil, adminResultStatus("delete metadata", result.Err)
+	}
+	if !result.Found || result.OldMeta == nil {
+		return &pb.DeleteResponse{
+			Success: true,
+			Message: fmt.Sprintf("key %q was already absent", req.GetKey()),
+			Found:   false,
+		}, nil
+	}
+
+	old := *result.OldMeta
+	// The metadata commit already removed keys, stripes, and placements on
+	// every node. Fragment deletion is therefore a fragment-only cleanup and
+	// runs after the commit, never before it. A partial failure leaves the
+	// remainder to task 09's orphan sweep.
+	gcCtx, cancel := context.WithTimeout(context.Background(), gcTimeout)
+	s.deleteStripeFragments(gcCtx, old.StripeID, old.Placement)
+	cancel()
+
+	return &pb.DeleteResponse{
+		Success:     true,
+		Message:     fmt.Sprintf("key %q deleted", req.GetKey()),
+		OldStripeId: old.StripeID,
+		Found:       true,
+	}, nil
+}
+
+// forwardDelete forwards a delete to the leader, preserving application
+// statuses such as Aborted from the leader.
+func (s *Server) forwardDelete(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
+	var resp *pb.DeleteResponse
+	err := s.forwardToLeader(ctx, func(fctx context.Context, client pb.StorageServiceClient) error {
+		out, err := client.Delete(fctx, req)
+		if err != nil {
+			return err
+		}
+		resp = out
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 // getConfig applies a get_config command on the leader. The FSM reports the
 // rs32 default when no configuration has been committed yet.
 func (s *Server) getConfig() (*pb.ConfigResponse, error) {
