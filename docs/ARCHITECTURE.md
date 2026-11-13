@@ -5,7 +5,7 @@
 ```mermaid
 flowchart TB
     subgraph clients["Clients"]
-        CLI["Gateway / CLI<br/>(in progress)"]
+        CLI["Gateway / CLI"]
         TEST["Integration tests"]
     end
 
@@ -132,8 +132,10 @@ replication total  = 5 * size          =  5.00x  (400% extra)
 The empty-value exception is five 1-byte RS shards (5 bytes) versus zero bytes
 for replication. After a healthy write, any three live nodes hold enough
 fragments to satisfy both the Raft quorum and reconstruction, so two node
-failures are tolerated. The engines are unit-tested now; tasks 06 and 07 wire
-them into the fragment write and read paths.
+failures are tolerated. A degraded RS write that stored only three shards is
+readable immediately but needs repair before the two-failure claim applies. The
+write path (task 06) and read path (task 07) use these engines directly; repair
+re-encodes a verified value with the same engine.
 
 ## Metadata protocol
 
@@ -190,8 +192,8 @@ operations keep the old full-value payload inside a nested `LegacyOp`, which is
 marked deprecated. Metadata commands are limited to 64 KiB of encoded JSON; the
 legacy operations are temporarily exempt. Neither `Put` nor `Get` uses the
 legacy commands any more: writes use `put_meta` and reads use `get_meta` plus
-fragment gathering. Task 15 removes the legacy commands and their snapshot
-section.
+fragment gathering. The transitional legacy commands and their snapshot section
+remain only for upgrade compatibility and are removed in the final cleanup.
 
 ### Snapshots
 
@@ -207,8 +209,8 @@ The FSM owns a versioned snapshot envelope:
 
 The `metadata` section contains stripes, key metadata, placements, and the
 singleton cluster config, plus `last_applied_index`. It never contains fragment
-payloads. The `legacy` section contains the transitional KV rows and is removed
-in task 15. Restore rejects unknown schema versions, restores both sections in
+payloads. The `legacy` section contains the transitional KV rows and is retained
+for upgrade compatibility. Restore rejects unknown schema versions, restores both sections in
 one SQLite transaction, and still accepts the version 1 single-section snapshot
 and the pre-SQLite raw map for upgrade safety. Restoring
 `last_applied_index` prevents older log entries from being re-applied on top of
@@ -279,8 +281,7 @@ sequenceDiagram
    definite rejection (`conflict` or `invalid`) proves the entry was not applied,
    so the new stripe's fragments are deleted. An ambiguous failure (timeout,
    leadership loss, connection loss, or an internal apply error) may have
-   committed; the fragments are deliberately retained for the task 09 orphan
-   sweep.
+   committed; the fragments are deliberately retained for the orphan sweep.
 10. After a successful overwrite, the leader asynchronously deletes the previous
     stripe's fragments on their owners. The `put_meta` apply already removed the
     old stripe and placement metadata rows on every node, so garbage collection
@@ -386,7 +387,7 @@ sequenceDiagram
 
 `Server.ReadVerified(ctx, meta)` is the repair-facing wrapper around the same
 gather/decode/verify path. It returns the verified bytes, never enqueues read
-repair, and never writes metadata. The task 09 repairer consumes it through a
+repair, and never writes metadata. The repairer consumes it through a
 `ValueReader` interface; `internal/cluster` never imports `internal/server`.
 
 The cost of a read is one Raft round trip for metadata plus the fragment
@@ -451,12 +452,13 @@ reports its state, leader flag, last-seen Unix time, local fragment count,
 storage bytes, and an error string when a probe fails. `degraded` is true when
 any node is unhealthy **or** any committed key is marked `degraded`.
 `degraded_stripes` counts keys whose metadata still carries the degraded flag.
-`repair_queue_depth` is reserved for task 09 and is zero here.
+`repair_queue_depth` is the leader's current repair queue depth.
 
-**Probe cadence.** `ClusterHealth` is deliberately on demand: it issues the
-probes when the RPC arrives, uses `CLUSTER_PROBE_TIMEOUT` (default `1s`) per
-node, and never blocks writes. Task 09 replaces the probe cadence with a cached
-background detector, at which point this handler reads the cache instead.
+**Probe cadence.** `ClusterHealth` is deliberately on demand and never blocks
+writes. It reads the leader's cached detector map; a voter the detector has not
+probed yet is probed on demand with `CLUSTER_PROBE_TIMEOUT` (default `1s`). The
+background detector probes every `DETECT_INTERVAL` (default `2s`) and is the
+source of truth for degraded mode.
 
 **Authorization.** `AUTH_TOKEN` is enforced by unary and stream interceptors
 installed in `cmd/server`. They require `authorization: Bearer <token>`, compare
@@ -637,7 +639,7 @@ covers the `keys`, `stripes`, `placements`, `cluster_config`, and
 `raft_state` tables and deliberately excludes fragment payloads: fragments are
 durable on their owner nodes and repaired from peers when missing. The write path
 no longer writes the legacy `store` table, but the envelope still carries the
-legacy section for upgrade compatibility until task 15. Restore applies both
+legacy section for upgrade compatibility. Restore applies both
 sections in one transaction and still accepts version 1 snapshots and the
 pre-SQLite raw map.
 

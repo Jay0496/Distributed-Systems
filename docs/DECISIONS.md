@@ -13,6 +13,8 @@
 | ADR-009 | Leader-coordinated verified reads with asynchronous read repair | Accepted |
 | ADR-010 | On-demand cluster health probing until a cached detector exists | Superseded by ADR-011 |
 | ADR-011 | Leader-owned detection and fixed-membership repair | Accepted |
+| ADR-012 | Use SQLite as the production local store | Accepted |
+| ADR-013 | Authenticate with a shared bearer token | Accepted |
 
 ---
 
@@ -335,6 +337,11 @@ when no configuration exists. Do not implement a 3x replication mode.
   extra), while five-copy replication stores `5 * size` bytes (400% extra).
   RS is the economical mode; replication is the simple, fast mode used for
   comparison and for cases where every node should hold a complete value.
+- Five full copies is the requested course scenario and is deliberately kept
+  even though it costs 400% extra. It uses every node, gives every node a
+  complete value, and makes the replication read path trivially verifiable
+  against one copy. The cost is accepted because the comparison with RS is part
+  of the project, not because replication is expected to be efficient.
 - Indices are global and mode-aware, so metadata can say whether a fragment is
   parity without re-reading the mode. In replication mode indices 3 and 4 are
   data, not parity.
@@ -798,7 +805,7 @@ shards.
 
 ### Alternatives considered
 
-- **Every node probes every peer.** Rejected: N² probe traffic and conflicting
+- **Every node probes every peer.** Rejected: NÂ² probe traffic and conflicting
   views without improving repair correctness.
 - **Per-shard Raft groups.** Rejected: far beyond course scope and unnecessary
   for five fixed nodes.
@@ -809,3 +816,165 @@ shards.
   all five placements are healthy.
 - **Persist a repair journal.** Rejected: metadata plus a periodic sweep already
   reconstructs the work, and a journal adds recovery states to test.
+
+---
+
+## ADR-012: Use SQLite as the production local store
+
+**Date:** 2026-11-12
+**Status:** Accepted
+
+### Context
+
+Every node needs durable local state for key metadata, stripe and placement
+records, cluster configuration, applied Raft indexes, and the fragments it owns.
+The first phase used an in-memory mock and wrote full values into the Raft FSM,
+which could not survive a restart and made the metadata-only design impossible.
+The store also has to support transactional snapshot restore and concurrent
+reads while the leader is uploading or deleting fragments.
+
+### Decision
+
+Use SQLite (`mattn/go-sqlite3`) as the production store on every node:
+
+- `STORE_PATH` defaults to `${DATA_DIR}/node.db`.
+- Open with `PRAGMA foreign_keys = ON`, WAL journaling, a bounded connection
+  pool, and `STORE_BUSY_TIMEOUT` for lock waits.
+- Schema migrations are additive. Tables are `keys`, `stripes`, `placements`,
+  `fragments`, `cluster_config`, and `raft_state`.
+- Metadata and local fragments share the database but are separate
+  repositories behind the `storage.Store` interface.
+- Raft snapshots export metadata only. Fragment payloads are durable on their
+  owner and are repaired from peers, never included in a snapshot.
+- Sentinel errors such as `storage.ErrNotFound` distinguish "absent" from an
+  I/O or transaction failure.
+- The in-memory store is a test double under `tests/support`; production
+  packages do not import it.
+
+Raft's log and stable state stay in BoltDB (`raft.db`) because that is the
+storage backend `hashicorp/raft` already provides. `node.db` and `raft.db` are
+separate files with separate lock and backup behavior.
+
+### Rationale
+
+- SQLite gives transactional, crash-safe local state without adding a server
+  process, and it works inside the single deployment image.
+- WAL plus a busy timeout allows concurrent readers while a write transaction
+  commits, which matches the leader's concurrent fragment and metadata work.
+- Foreign keys and a single transaction for snapshot restore keep keys,
+  stripes, placements, and config consistent.
+- Keeping fragments out of snapshots bounds snapshot size and makes the
+  metadata-only Raft invariant enforceable and testable.
+
+### Consequences
+
+**Positive**
+
+- Metadata and fragments survive restarts and are visible to the local
+  `Stats`, read, repair, and orphan-sweep paths.
+- Snapshot restore is one transaction and can reject unknown schema versions.
+- The store is inspectable with the `sqlite3` CLI in the runtime image.
+
+**Negative**
+
+- CGO is required for `mattn/go-sqlite3`; the `golang:1.22` image provides
+  `gcc`, and CGO must stay enabled for tests.
+- A leaked SQLite handle produces `database is locked`; every store must be
+  closed in `t.Cleanup` and on process shutdown.
+- Metadata and fragments commit separately, so crash windows produce degraded
+  writes or orphan fragments. Repair and the orphan sweep own those cases.
+- A plain file copy of `node.db` while the WAL is active is not a safe backup;
+  use `.backup` or stop the node.
+
+### Alternatives considered
+
+- **Keep the in-memory store.** Rejected: no persistence, no restart safety,
+  and it hides SQLite-specific behavior from tests.
+- **BoltDB for everything.** Rejected: metadata queries, placement joins, and
+  fragment accounting are simpler in SQL, and BoltDB is already used for Raft.
+- **An external database.** Rejected: another service to deploy for a five-node
+  course project; SQLite is sufficient and keeps the one-command deployment.
+- **Snapshot fragments too.** Rejected: it multiplies snapshot size and
+  duplicates data that can be repaired from peers.
+
+---
+
+## ADR-013: Authenticate with a shared bearer token
+
+**Date:** 2026-11-12
+**Status:** Accepted
+
+### Context
+
+The gRPC API is reachable from the Compose network and, for the published node
+ports, from the host. The project needs a small access-control mechanism that
+works for the gateway, the failure detector, forwarding, fragment transfer, and
+the repairer without introducing users, sessions, or an identity provider.
+
+### Decision
+
+Use one shared bearer token, configured by `AUTH_TOKEN`:
+
+- The server installs unary and stream interceptors that require
+  `authorization: Bearer <token>`.
+- Tokens are compared in constant time over SHA-256 digests.
+- Only `/grpc.health.v1.Health/Check` and
+  `/grpc.health.v1.Health/Watch` are exempt, so Compose health checks and the
+  detector work when auth is enabled.
+- Every internal client dials through `internal/rpc.DialOptions`, which attaches
+  the token and the `MAX_MESSAGE_SIZE` limit consistently.
+- `Server.CheckAuth` refuses to start when a token is configured but the
+  interceptors were not installed.
+- An empty token disables authentication and logs a startup warning.
+- Tokens are never printed. Rotation requires restarting the cluster and every
+  tool with the new value.
+
+The token is authentication, not authorization: there are no users, roles, or
+per-key permissions. Anyone with the token and network access has full API
+access. TLS remains optional; when it is off, the bearer token crosses the
+network in plaintext.
+
+### Rationale
+
+- One mechanism covers the gateway, forwarding, fragments, probes, and repair
+  without separate credentials for each internal path.
+- A constant-time comparison avoids a trivial timing side channel and is simple
+  enough to audit.
+- Exempting only the standard health service keeps Compose and the detector
+  functional without creating a broad unauthenticated surface.
+- A shared token is proportionate to a course deployment on a private Docker
+  network and is honest about what it does not provide.
+
+### Consequences
+
+**Positive**
+
+- Unauthenticated clients cannot read, write, delete, change config, or trigger
+  repair when a token is configured.
+- Internal calls fail closed with the same `Unauthenticated` status if the token
+  is missing or wrong.
+- The same helper applies message limits, so auth and payload limits cannot
+  drift between clients.
+
+**Negative**
+
+- No per-user attribution, audit log, or revocation of a single client; rotate
+  the shared value and restart.
+- Anyone who obtains the token has full access.
+- Health methods remain unauthenticated by design and are a liveness signal
+  only.
+- Tokens are visible in the container environment to anyone with Docker access.
+- TLS is not automatic; enabling it requires certificate provisioning and a
+  health-check update.
+
+### Alternatives considered
+
+- **No authentication.** Rejected: the published ports would allow anonymous
+  writes and deletes.
+- **Per-user API keys or JWT.** Rejected as out of scope; it requires a user
+  store, issuance, expiry, and revocation that the project does not need.
+- **Mutual TLS only.** Rejected as the sole mechanism: certificate provisioning
+  would make the one-command deployment fail out of the box.
+- **Exempt operational RPCs from auth.** Rejected: `NodeStatus`, `Stats`,
+  `ClusterHealth`, and `Repair` expose or mutate cluster state and stay
+  authenticated.
