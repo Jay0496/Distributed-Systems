@@ -211,6 +211,24 @@ so a result can be reproduced or discarded as environment-specific.
 - Do not take a Raft snapshot during a load run. Snapshots are forced only
   before a storage measurement; a mid-run snapshot distorts latency.
 
+## Documentation checks
+
+Before quoting a result, run the documentation guard so the commands and links
+around it still resolve:
+
+```powershell
+./scripts/check-docs.ps1
+```
+
+```bash
+./scripts/check-docs.sh
+```
+
+The expected ratios in this guide match
+[REQUIREMENTS_MAPPING.md](REQUIREMENTS_MAPPING.md#storage-accounting). If a
+benchmark flag or output file changes, update this guide, the README summary,
+and the mapping in the same change.
+
 ## Honest reporting checklist
 
 1. Report both payload and disk ratios. Payload is the claim; disk is the

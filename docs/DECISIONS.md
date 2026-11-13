@@ -841,7 +841,8 @@ Use SQLite (`mattn/go-sqlite3`) as the production store on every node:
 - Open with `PRAGMA foreign_keys = ON`, WAL journaling, a bounded connection
   pool, and `STORE_BUSY_TIMEOUT` for lock waits.
 - Schema migrations are additive. Tables are `keys`, `stripes`, `placements`,
-  `fragments`, `cluster_config`, and `raft_state`.
+  `fragments`, `cluster_config`, and `raft_state`, plus the transitional
+  `store` table retained for upgrade compatibility.
 - Metadata and local fragments share the database but are separate
   repositories behind the `storage.Store` interface.
 - Raft snapshots export metadata only. Fragment payloads are durable on their

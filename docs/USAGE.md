@@ -66,8 +66,8 @@ Server-side tuning variables (`MAX_VALUE_SIZE`, `READ_TIMEOUT`,
   positional value is passed through the shell, so binary data should use a
   file.
 - `put` accepts either a positional value or `--value-file`, never both. Keys
-  and values must be non-empty; the server rejects values larger than
-  `MAX_VALUE_SIZE` (default 8 MiB).
+  must be non-empty. An empty value is valid and is encoded as an empty stripe;
+  the server rejects values larger than `MAX_VALUE_SIZE` (default 8 MiB).
 - A write is last-write-wins unless `--version N` supplies an expected version.
   `delete` is idempotent; `--version N` makes it compare-and-delete.
 - Retries use 100 ms, 250 ms, and 500 ms steps with ±20% jitter. `Unavailable`

@@ -96,12 +96,12 @@ The demo queries each node's SQLite `fragments` table for the stripe:
 ```text
 Per-node fragments for the rs32 stripe:
 Node    Fragments  Bytes
-node1   1          1.3 KiB
-node2   1          1.3 KiB
-node3   1          1.3 KiB
-node4   1          1.3 KiB
-node5   1          1.3 KiB
-PASS: rs32 placement - 5 shards, 6.7 KiB total
+node1   1          1.33 KiB
+node2   1          1.33 KiB
+node3   1          1.33 KiB
+node4   1          1.33 KiB
+node5   1          1.33 KiB
+PASS: rs32 placement - 5 shards, 6.67 KiB total
 ```
 
 With a 4096-byte value, `shardSize = ceil(4096/3) = 1366`, so five shards store
@@ -122,12 +122,12 @@ default mode set to replication on node1
 
 Per-node fragments for the replication stripe:
 Node    Fragments  Bytes
-node1   1          4.0 KiB
+node1   1          4.00 KiB
 …
-PASS: replication placement - 5 copies, 20.0 KiB total
+PASS: replication placement - 5 copies, 20.00 KiB total
 
-rs32:        6.7 KiB stored for 4.0 KiB original (1.67x, about 67% extra)
-replication: 20.0 KiB stored for 4.0 KiB original (5x, about 400% extra)
+rs32:        6.67 KiB stored for 4.00 KiB original (1.67x, about 67% extra)
+replication: 20.00 KiB stored for 4.00 KiB original (5x, about 400% extra)
 replication / rs32 total ratio: 3x
 ```
 
@@ -149,14 +149,15 @@ Expected categories:
 
 ```text
 PASS: failure baseline - wrote demo-key-failure with five shards
-PASS: degraded status - healthy=3/5, degraded_stripes=1
+PASS: degraded status - healthy=3/5, degraded_stripes=0
 PASS: read with two nodes down - reconstructed from 3 shards
 PASS: write with two nodes down - committed 3/5 shards, degraded=true
 ```
 
 `status` shows `healthy=3/5`, `degraded=true`, and the stopped nodes as
-unhealthy. Reads still reconstruct from three shards. A new write stores only
-three placements and commits as degraded.
+unhealthy. `degraded_stripes` is still zero at that point because the existing
+stripes are healthy; stopping voters is enough to set the cluster-level
+degraded flag. The next write is the one that records a degraded stripe.
 
 Talking point: this is the important qualification. A **healthy** write, or a
 stripe repaired back to five shards, tolerates two failures. A degraded RS

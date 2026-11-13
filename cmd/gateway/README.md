@@ -2,8 +2,8 @@
 
 The gateway code moved to `cmd/gateway` (process wiring and flag parsing) and
 `internal/gateway` (consistent-hash entry ring, retrying client, CLI commands,
-and rendering). There is no standalone `go run main.go`: build the binary in
-Docker, or use the Compose `gateway` service.
+and rendering). There is no standalone single-file Go entrypoint: build the
+binary in Docker, or use the Compose `gateway` service.
 
 The maintained documentation is:
 

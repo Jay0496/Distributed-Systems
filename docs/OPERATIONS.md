@@ -107,7 +107,8 @@ docker compose exec node1 sqlite3 /data/node.db "select stripe_id, shard_index, 
 ```
 
 The tables are `keys`, `stripes`, `placements`, `fragments`, `cluster_config`,
-and `raft_state`. The runtime image includes the `sqlite` CLI so operators do
+and `raft_state`, plus the transitional `store` table retained for upgrade
+compatibility until the final cleanup. The runtime image includes the `sqlite` CLI so operators do
 not need host tools. Treat these queries as read-only: editing metadata by hand
 can desynchronize it from Raft and from the fragments on the other nodes.
 
@@ -148,9 +149,14 @@ then start it:
 ```powershell
 docker compose stop node1
 docker cp ./node1-backup.db node1:/data/node.db
-docker compose exec node1 rm -f /data/node.db-wal /data/node.db-shm
+docker run --rm -v distributed-systems_node1-data:/data alpine `
+  rm -f /data/node.db-wal /data/node.db-shm
 docker compose start node1
 ```
+
+`docker compose exec` only works on a running container, so the WAL cleanup runs
+in a throwaway container attached to the same volume. Repeat the copy for each
+node when restoring a set.
 
 If the restored metadata references fragments that are not in the local
 database, the leader's repairer refills them from live peers. That is expected.
