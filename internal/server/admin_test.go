@@ -473,7 +473,8 @@ func TestServerSnapshotAndCheckpoint(t *testing.T) {
 	}
 }
 
-func TestCheckAuth(t *testing.T) {	open := &Server{cfg: config.Config{}}
+func TestCheckAuth(t *testing.T) {
+	open := &Server{cfg: config.Config{}}
 	if err := open.CheckAuth(); err != nil {
 		t.Fatalf("auth-disabled server CheckAuth = %v", err)
 	}
