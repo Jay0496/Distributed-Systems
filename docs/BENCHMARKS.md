@@ -131,7 +131,10 @@ metadata. Both ratios are in `storage.csv`.
 The script owns container stop/start because the bench container has no Docker
 socket. The split is:
 
-1. Seed keys and verify five fragments each: `bench recovery --seed-only`.
+1. Seed keys with a timestamped key prefix and verify five fragments each:
+   `bench recovery --seed-only`. A unique prefix matters: an overwrite replaces
+   the old stripe, so fragment-count verification compares against the
+   pre-write baseline rather than assuming an empty cluster.
 2. Stop one node, then two nodes, using `docker compose stop`.
 3. Poll `gateway status --json` until `degraded=true`; record the timestamp.
 4. Start the nodes and record the restart timestamp.
