@@ -23,6 +23,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runLoad(args[1:], stdout, stderr)
 	case "storage":
 		return runStorage(args[1:], stdout, stderr)
+	case "recovery":
+		return runRecovery(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		fmt.Fprint(stdout, usage())
 		return 0
@@ -38,6 +40,7 @@ func usage() string {
 Commands:
   run       mixed put/get load with latency percentiles and throughput
   storage   write a dataset, force snapshots and WAL checkpoints, measure ratios
+  recovery  measure degraded and repair time through ClusterHealth
 
 Run "bench <command> --help" for command flags.
 
@@ -49,5 +52,6 @@ Connection settings:
 Examples:
   bench run --mode rs32 --duration 60s --concurrency 32 --output bench-results
   bench storage --mode replication --values 1000 --value-size 4096
+  bench recovery --measure-only --start-time 2026-01-02T15:04:05Z
 `
 }
