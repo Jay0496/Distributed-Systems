@@ -55,10 +55,6 @@ func DialOptions(token string, maxMessageBytes int) ([]grpc.DialOption, error) {
 	}
 
 	token = strings.TrimSpace(token)
-	if token == "" {
-		return opts, nil
-	}
-
 	opts = append(opts,
 		grpc.WithChainUnaryInterceptor(func(
 			ctx context.Context,
@@ -68,7 +64,7 @@ func DialOptions(token string, maxMessageBytes int) ([]grpc.DialOption, error) {
 			invoker grpc.UnaryInvoker,
 			callOpts ...grpc.CallOption,
 		) error {
-			return invoker(AppendAuth(ctx, token), method, req, reply, cc, callOpts...)
+			return invoker(AppendRequestID(AppendAuth(ctx, token)), method, req, reply, cc, callOpts...)
 		}),
 		grpc.WithChainStreamInterceptor(func(
 			ctx context.Context,
@@ -78,7 +74,7 @@ func DialOptions(token string, maxMessageBytes int) ([]grpc.DialOption, error) {
 			streamer grpc.Streamer,
 			callOpts ...grpc.CallOption,
 		) (grpc.ClientStream, error) {
-			return streamer(AppendAuth(ctx, token), desc, cc, method, callOpts...)
+			return streamer(AppendRequestID(AppendAuth(ctx, token)), desc, cc, method, callOpts...)
 		}),
 	)
 	return opts, nil

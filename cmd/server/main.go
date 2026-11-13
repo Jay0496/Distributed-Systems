@@ -106,6 +106,9 @@ func main() {
 		grpc.MaxRecvMsgSize(cfg.MaxMessageSize),
 		grpc.MaxSendMsgSize(cfg.MaxMessageSize),
 	)
+	// Every request gets a correlation ID that survives forwarding and fragment
+	// calls, so logs from different nodes can be joined by one ID.
+	grpcOpts = append(grpcOpts, rpc.RequestIDServerOptions()...)
 
 	// AUTH_TOKEN is enforced by interceptors at the process boundary. Health
 	// checks stay exempt so Compose and the detector keep working.
@@ -125,10 +128,13 @@ func main() {
 	}
 	pb.RegisterStorageServiceServer(grpcServer, storageServer)
 
+	// "" is liveness and storage.StorageService is readiness. Both start
+	// NOT_SERVING until the store pings and Raft knows a leader.
 	healthServer := health.NewServer()
-	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-	healthServer.SetServingStatus("storage.StorageService", healthpb.HealthCheckResponse_SERVING)
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	healthServer.SetServingStatus(server.HealthServiceName, healthpb.HealthCheckResponse_NOT_SERVING)
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
+	storageServer.SetHealthServer(healthServer)
 
 	// Optionally join an existing cluster through a live leader.
 	joinCluster(cfg, string(transport.LocalAddr()))
@@ -138,6 +144,7 @@ func main() {
 	// shards; the local orphan sweep runs everywhere.
 	failureCtx, stopFailure := context.WithCancel(context.Background())
 	defer stopFailure()
+	storageServer.StartHealthMonitor(failureCtx)
 	detector := cluster.NewDetector(cluster.DetectorOptions{
 		Interval:  cfg.DetectInterval,
 		Timeout:   cfg.DetectTimeout,
@@ -166,12 +173,13 @@ func main() {
 	go func() {
 		<-sigCh
 		log.Printf("received shutdown signal, stopping %s", cfg.NodeID)
+		storageServer.MarkShuttingDown()
+		gracefulStop(grpcServer, 30*time.Second)
 		stopFailure()
 		_ = storageServer.Close()
-		grpcServer.GracefulStop()
 		_ = node.Close()
-		_ = transport.Close()
 		_ = store.Close()
+		_ = transport.Close()
 	}()
 
 	fmt.Printf("gRPC server listening on port %s\n", cfg.GRPCPort)
@@ -184,6 +192,24 @@ func main() {
 	_ = storageServer.Close()
 	_ = node.Close()
 	_ = transport.Close()
+}
+
+// gracefulStop drains in-flight RPCs for at most timeout, then force-stops.
+func gracefulStop(server *grpc.Server, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		server.GracefulStop()
+		close(done)
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		server.Stop()
+		<-done
+	}
 }
 
 // detectorNodes builds the detector's node-to-gRPC-address map, including the

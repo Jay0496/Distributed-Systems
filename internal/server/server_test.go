@@ -10,6 +10,7 @@ import (
 
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/consensus"
+	"distributed-kv-store/internal/rpc"
 
 	pb "distributed-kv-store/proto"
 
@@ -35,12 +36,31 @@ type testNode struct {
 	node      *consensus.Node
 	srv       *Server
 
-	lis     *bufconn.Listener
-	grpcSrv *grpc.Server
-	conn    *grpc.ClientConn
+	lis       *bufconn.Listener
+	grpcSrv   *grpc.Server
+	conn      *grpc.ClientConn
+	healthSrv    *health.Server
+	healthCancel context.CancelFunc
 
 	client pb.StorageServiceClient
 	health healthpb.HealthClient
+
+	// requestID records the most recent inbound correlation header so tests can
+	// prove forwarding preserves it.
+	requestIDMu sync.Mutex
+	requestID   string
+}
+
+func (tn *testNode) setRequestID(id string) {
+	tn.requestIDMu.Lock()
+	tn.requestID = id
+	tn.requestIDMu.Unlock()
+}
+
+func (tn *testNode) lastRequestID() string {
+	tn.requestIDMu.Lock()
+	defer tn.requestIDMu.Unlock()
+	return tn.requestID
 }
 
 // testCluster is a fully meshed in-memory Raft cluster whose gRPC front ends
@@ -177,15 +197,34 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 			DataDir: t.TempDir(),
 			Peers:   peers,
 		}
-		grpcSrv := grpc.NewServer()
+		grpcOpts := rpc.RequestIDServerOptions()
+		grpcOpts = append(grpcOpts, grpc.ChainUnaryInterceptor(func(
+			ctx context.Context,
+			req any,
+			info *grpc.UnaryServerInfo,
+			handler grpc.UnaryHandler,
+		) (any, error) {
+			if md, ok := metadata.FromIncomingContext(ctx); ok {
+				if values := md.Get(rpc.RequestIDMetadataKey); len(values) > 0 {
+					tn.setRequestID(values[0])
+				}
+			}
+			return handler(ctx, req)
+		}))
+		grpcSrv := grpc.NewServer(grpcOpts...)
 		srv := New(cfg, tn.store, tn.node, dial)
 		pb.RegisterStorageServiceServer(grpcSrv, srv)
 		tn.srv = srv
 
 		hs := health.NewServer()
-		hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-		hs.SetServingStatus("storage.StorageService", healthpb.HealthCheckResponse_SERVING)
+		hs.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+		hs.SetServingStatus(HealthServiceName, healthpb.HealthCheckResponse_NOT_SERVING)
 		healthpb.RegisterHealthServer(grpcSrv, hs)
+		srv.SetHealthServer(hs)
+		tn.healthSrv = hs
+		healthCtx, healthCancel := context.WithCancel(context.Background())
+		tn.healthCancel = healthCancel
+		srv.StartHealthMonitor(healthCtx)
 
 		go func(srv *grpc.Server, lis *bufconn.Listener) {
 			_ = srv.Serve(lis)
@@ -203,6 +242,9 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 
 	t.Cleanup(func() {
 		for _, tn := range c.nodes {
+			if tn.healthCancel != nil {
+				tn.healthCancel()
+			}
 			if tn.grpcSrv != nil {
 				tn.grpcSrv.Stop()
 			}

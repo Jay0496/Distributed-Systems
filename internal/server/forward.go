@@ -119,6 +119,25 @@ func (s *Server) leaderGRPCAddr() (string, bool) {
 	return target, ok
 }
 
+// forwardContext derives one forwarding attempt from the incoming request. It
+// preserves cancellation and the request ID, and caps the attempt at the
+// configured forward limit so a slow leader cannot outlive the client deadline.
+func (s *Server) forwardContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := forwardTimeout
+	if s.cfg.WriteTimeout > 0 && s.cfg.WriteTimeout < timeout {
+		timeout = s.cfg.WriteTimeout
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			timeout = remaining
+		}
+	}
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 // alreadyForwarded reports whether this request already made one forwarding hop.
 func alreadyForwarded(ctx context.Context) bool {
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -147,8 +166,8 @@ func (s *Server) forwardPut(ctx context.Context, req *pb.PutRequest) (*pb.PutRes
 			continue
 		}
 
-		fctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
-		fctx = metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true")
+		fctx, cancel := s.forwardContext(ctx)
+		fctx = rpc.AppendRequestID(metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true"))
 		resp, err := pb.NewStorageServiceClient(conn).Put(fctx, req)
 		cancel()
 
@@ -187,8 +206,8 @@ func (s *Server) forwardToLeader(ctx context.Context, call func(context.Context,
 			continue
 		}
 
-		fctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
-		fctx = metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true")
+		fctx, cancel := s.forwardContext(ctx)
+		fctx = rpc.AppendRequestID(metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true"))
 		err = call(fctx, pb.NewStorageServiceClient(conn))
 		cancel()
 
@@ -224,8 +243,8 @@ func (s *Server) forwardGet(ctx context.Context, req *pb.GetRequest) (*pb.GetRes
 			continue
 		}
 
-		fctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
-		fctx = metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true")
+		fctx, cancel := s.forwardContext(ctx)
+		fctx = rpc.AppendRequestID(metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true"))
 		resp, err := pb.NewStorageServiceClient(conn).Get(fctx, req)
 		cancel()
 

@@ -5,6 +5,9 @@ option go_package = "./proto";
 service StorageService {
   rpc Put (PutRequest) returns (PutResponse);
   rpc Get (GetRequest) returns (GetResponse);
+  // Heartbeat reports readiness: true when the node is live, initialized, and
+  // has a known leader. Deprecated: prefer grpc.health.v1; the RPC is kept for
+  // wire compatibility.
   rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
 
   // Join asks the current leader to add a new voter to the Raft cluster.
