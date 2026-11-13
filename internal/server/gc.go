@@ -2,9 +2,10 @@ package server
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
+	"distributed-kv-store/internal/rpc"
 	"distributed-kv-store/internal/storage"
 
 	pb "distributed-kv-store/proto"
@@ -35,24 +36,27 @@ func (s *Server) deleteStripeFragments(ctx context.Context, stripeID string, pla
 
 	for owner := range owners {
 		if err := ctx.Err(); err != nil {
-			log.Printf("write: fragment cleanup cancelled stripe=%s reason=%v", stripeID, err)
+			slog.Info("fragment cleanup cancelled",
+				"stripe_id", stripeID, "error", err, "request_id", rpc.RequestID(ctx))
 			return
 		}
 
 		if owner == s.cfg.NodeID {
 			if err := s.deleteLocalStripeFragments(stripeID); err != nil {
-				log.Printf("write: local fragment cleanup failed stripe=%s error=%v", stripeID, err)
+				slog.Warn("local fragment cleanup failed",
+					"stripe_id", stripeID, "error", err, "request_id", rpc.RequestID(ctx))
 			}
 			continue
 		}
 
 		target, ok := s.cfg.Peers[owner]
 		if !ok {
-			log.Printf("write: no address for fragment owner stripe=%s owner=%s", stripeID, owner)
+			slog.Warn("no address for fragment owner", "stripe_id", stripeID, "owner", owner)
 			continue
 		}
 		if err := s.deleteRemoteStripeFragments(ctx, target, stripeID); err != nil {
-			log.Printf("write: remote fragment cleanup failed stripe=%s owner=%s error=%v", stripeID, owner, err)
+			slog.Warn("remote fragment cleanup failed",
+				"stripe_id", stripeID, "owner", owner, "error", err, "request_id", rpc.RequestID(ctx))
 		}
 	}
 }
@@ -107,6 +111,7 @@ func (s *Server) garbageCollectOldStripe(currentStripeID string, old *storage.Ke
 		ctx, cancel := context.WithTimeout(root, gcTimeout)
 		defer cancel()
 		s.deleteStripeFragments(ctx, oldMeta.StripeID, oldMeta.Placement)
-		log.Printf("write: garbage-collected stripe=%s positions=%d", oldMeta.StripeID, len(oldMeta.Placement))
+		slog.Info("garbage-collected stripe",
+			"stripe_id", oldMeta.StripeID, "positions", len(oldMeta.Placement))
 	}()
 }

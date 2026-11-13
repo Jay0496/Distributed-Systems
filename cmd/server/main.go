@@ -5,7 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -17,9 +17,11 @@ import (
 	"distributed-kv-store/internal/cluster"
 	"distributed-kv-store/internal/config"
 	"distributed-kv-store/internal/consensus"
+	"distributed-kv-store/internal/logging"
 	"distributed-kv-store/internal/rpc"
 	"distributed-kv-store/internal/server"
 	"distributed-kv-store/internal/storage"
+	"distributed-kv-store/internal/version"
 
 	pb "distributed-kv-store/proto"
 
@@ -33,8 +35,22 @@ import (
 
 func main() {
 	cfg := config.Load()
+	logger := logging.New(os.Stdout, cfg.LogFormat, "server",
+		"node_id", cfg.NodeID,
+		"version", version.Value(),
+	)
+	slog.SetDefault(logger)
 
-	fmt.Printf("Starting %s (gRPC on %s, Raft on %s, data dir %s)...\n", cfg.NodeID, cfg.GRPCPort, cfg.RaftPort, cfg.DataDir)
+	// Keep one concise human-readable line for the demo; structured lifecycle
+	// logs carry the machine-readable detail.
+	fmt.Printf("Starting %s %s (gRPC on %s, Raft on %s, data dir %s)...\n",
+		cfg.NodeID, version.Value(), cfg.GRPCPort, cfg.RaftPort, cfg.DataDir)
+	logger.Info("starting node",
+		"grpc_port", cfg.GRPCPort,
+		"raft_port", cfg.RaftPort,
+		"data_dir", cfg.DataDir,
+		"log_format", cfg.LogFormat,
+	)
 
 	// Open the SQLite store before Raft so a broken database fails fast.
 	store, err := storage.Open(storage.StoreConfig{
@@ -42,24 +58,19 @@ func main() {
 		BusyTimeout: cfg.StoreBusyTimeout,
 	})
 	if err != nil {
-		log.Fatalf("Failed to open store at %s: %v", cfg.StorePath, err)
+		fatalf(logger, "open store", "path", cfg.StorePath, "error", err)
 	}
-	defer func() {
-		if err := store.Close(); err != nil {
-			log.Printf("Failed to close store: %v", err)
-		}
-	}()
 
 	// Resolve the advertised Raft address. In Docker Compose this resolves
 	// to the container name (e.g. node1:60051).
 	advertiseAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%s", cfg.NodeID, cfg.RaftPort))
 	if err != nil {
-		log.Fatalf("Failed to resolve raft advertise address: %v", err)
+		fatalf(logger, "resolve raft advertise address", "error", err)
 	}
 
 	transport, err := raft.NewTCPTransport(fmt.Sprintf("0.0.0.0:%s", cfg.RaftPort), advertiseAddr, 3, 10*time.Second, os.Stderr)
 	if err != nil {
-		log.Fatalf("Failed to create raft transport: %v", err)
+		fatalf(logger, "create raft transport", "error", err)
 	}
 
 	bootstrapConfig := raft.Configuration{}
@@ -82,19 +93,19 @@ func main() {
 
 	node, err := consensus.StartRaft(cfg.NodeID, store, transport, cfg.DataDir, bootstrapConfig)
 	if err != nil {
-		log.Fatalf("Failed to start Raft: %v", err)
+		fatalf(logger, "start raft", "error", err)
 	}
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", cfg.GRPCPort))
 	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
+		fatalf(logger, "listen on gRPC port", "error", err)
 	}
 
 	var grpcOpts []grpc.ServerOption
 	if cfg.TLSEnabled {
 		creds, err := credentials.NewServerTLSFromFile(cfg.TLSCert, cfg.TLSKey)
 		if err != nil {
-			log.Fatalf("Failed to load TLS credentials: %v", err)
+			fatalf(logger, "load TLS credentials", "error", err)
 		}
 		grpcOpts = append(grpcOpts, grpc.Creds(creds))
 	}
@@ -120,11 +131,12 @@ func main() {
 	storageServer := server.New(cfg, store, node, nil)
 	if cfg.AuthToken != "" {
 		storageServer.EnableAuth()
+		logger.Info("authentication enabled")
 	} else {
-		log.Printf("WARNING: AUTH_TOKEN is not set; gRPC authentication is disabled")
+		logger.Warn("AUTH_TOKEN is not set; gRPC authentication is disabled")
 	}
 	if err := storageServer.CheckAuth(); err != nil {
-		log.Fatalf("Invalid authorization configuration: %v", err)
+		fatalf(logger, "invalid authorization configuration", "error", err)
 	}
 	pb.RegisterStorageServiceServer(grpcServer, storageServer)
 
@@ -137,13 +149,12 @@ func main() {
 	storageServer.SetHealthServer(healthServer)
 
 	// Optionally join an existing cluster through a live leader.
-	joinCluster(cfg, string(transport.LocalAddr()))
+	joinCluster(cfg, string(transport.LocalAddr()), logger)
 
 	// Start leader-gated failure detection and repair. Every node runs the
 	// detector supervisor, but only the leader probes peers and reconstructs
 	// shards; the local orphan sweep runs everywhere.
 	failureCtx, stopFailure := context.WithCancel(context.Background())
-	defer stopFailure()
 	storageServer.StartHealthMonitor(failureCtx)
 	detector := cluster.NewDetector(cluster.DetectorOptions{
 		Interval:  cfg.DetectInterval,
@@ -166,50 +177,46 @@ func main() {
 	}
 	storageServer.AttachFailureManagement(failureCtx, detector)
 
+	shutdown := func(trigger string) {
+		logger.Info("shutting down", "trigger", trigger)
+		if err := server.Shutdown(server.ShutdownOptions{
+			Server:        storageServer,
+			GRPC:          grpcServer,
+			Store:         store,
+			Raft:          node,
+			Transport:     transport,
+			CancelProcess: stopFailure,
+			Timeout:       cfg.ShutdownTimeout,
+			Logger:        logger,
+		}); err != nil {
+			logger.Error("shutdown failed", "error", err)
+		}
+	}
+
 	// Shut down cleanly on SIGINT/SIGTERM so the BoltDB file lock is released
 	// (important for fast container restarts) and in-flight RPCs can drain.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Printf("received shutdown signal, stopping %s", cfg.NodeID)
-		storageServer.MarkShuttingDown()
-		gracefulStop(grpcServer, 30*time.Second)
-		stopFailure()
-		_ = storageServer.Close()
-		_ = node.Close()
-		_ = store.Close()
-		_ = transport.Close()
+		shutdown("signal")
 	}()
 
-	fmt.Printf("gRPC server listening on port %s\n", cfg.GRPCPort)
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	logger.Info("gRPC server listening", "port", cfg.GRPCPort)
 	if err := grpcServer.Serve(lis); err != nil {
-		log.Printf("gRPC server stopped: %v", err)
+		logger.Warn("gRPC server stopped", "error", err)
 	}
 
-	// If Serve returns without a signal, still release Raft and BoltDB.
-	stopFailure()
-	_ = storageServer.Close()
-	_ = node.Close()
-	_ = transport.Close()
+	// If Serve returns without a signal, still release Raft and SQLite. The
+	// store and Raft closers are idempotent, so a repeated signal is safe.
+	shutdown("serve_return")
 }
 
-// gracefulStop drains in-flight RPCs for at most timeout, then force-stops.
-func gracefulStop(server *grpc.Server, timeout time.Duration) {
-	done := make(chan struct{})
-	go func() {
-		server.GracefulStop()
-		close(done)
-	}()
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-done:
-	case <-timer.C:
-		server.Stop()
-		<-done
-	}
+// fatalf logs a structured startup failure and exits.
+func fatalf(logger *slog.Logger, msg string, attrs ...any) {
+	logger.Error(msg, attrs...)
+	os.Exit(1)
 }
 
 // detectorNodes builds the detector's node-to-gRPC-address map, including the
@@ -250,7 +257,7 @@ func orphanGuard(node *consensus.Node, maxLag uint64) func(context.Context) (boo
 // joinCluster asks the node configured in JOIN_ADDR to add this node as a
 // voter. It retries so that startup ordering between containers does not
 // matter.
-func joinCluster(cfg config.Config, raftAddr string) {
+func joinCluster(cfg config.Config, raftAddr string, logger *slog.Logger) {
 	if cfg.JoinAddr == "" {
 		return
 	}
@@ -258,7 +265,7 @@ func joinCluster(cfg config.Config, raftAddr string) {
 	go func() {
 		opts, err := rpc.DialOptions(cfg.AuthToken, cfg.MaxMessageSize)
 		if err != nil {
-			log.Printf("join disabled: %v", err)
+			logger.Warn("join disabled", "error", err)
 			return
 		}
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -277,19 +284,22 @@ func joinCluster(cfg config.Config, raftAddr string) {
 				conn.Close()
 
 				if err == nil && resp.GetSuccess() {
-					log.Printf("joined cluster via %s", cfg.JoinAddr)
+					logger.Info("joined cluster", "leader_addr", cfg.JoinAddr)
 					return
 				}
 				if err != nil {
-					log.Printf("join attempt %d via %s failed: %v", attempt, cfg.JoinAddr, err)
+					logger.Warn("join attempt failed",
+						"attempt", attempt, "leader_addr", cfg.JoinAddr, "error", err)
 				} else {
-					log.Printf("join attempt %d via %s rejected: %s", attempt, cfg.JoinAddr, resp.GetMessage())
+					logger.Warn("join attempt rejected",
+						"attempt", attempt, "leader_addr", cfg.JoinAddr, "message", resp.GetMessage())
 				}
 			} else {
-				log.Printf("join attempt %d via %s dial failed: %v", attempt, cfg.JoinAddr, err)
+				logger.Warn("join dial failed",
+					"attempt", attempt, "leader_addr", cfg.JoinAddr, "error", err)
 			}
 			time.Sleep(2 * time.Second)
 		}
-		log.Printf("gave up joining cluster via %s after 10 attempts", cfg.JoinAddr)
+		logger.Warn("gave up joining cluster", "leader_addr", cfg.JoinAddr, "attempts", 10)
 	}()
 }

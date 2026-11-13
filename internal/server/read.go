@@ -42,7 +42,7 @@ func (s *Server) read(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	if err != nil {
 		return nil, readStatusError(err)
 	}
-	repaired := s.enqueueReadRepair(meta, value, failed)
+	repaired := s.enqueueReadRepair(ctx, meta, value, failed)
 
 	return &pb.GetResponse{
 		Success:    true,

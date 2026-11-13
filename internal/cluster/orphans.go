@@ -2,7 +2,8 @@ package cluster
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"distributed-kv-store/internal/storage"
@@ -50,7 +51,9 @@ func NewOrphanSweeper(opts OrphanSweeperOptions) *OrphanSweeper {
 		opts.Now = time.Now
 	}
 	if opts.Logf == nil {
-		opts.Logf = log.Printf
+		opts.Logf = func(format string, args ...any) {
+			slog.Info(fmt.Sprintf(format, args...))
+		}
 	}
 	return &OrphanSweeper{opts: opts}
 }

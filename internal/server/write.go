@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"distributed-kv-store/internal/consensus"
 	"distributed-kv-store/internal/redundancy"
+	"distributed-kv-store/internal/rpc"
 	"distributed-kv-store/internal/storage"
 
 	pb "distributed-kv-store/proto"
@@ -343,6 +345,15 @@ func (s *Server) write(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse
 		message := "write committed"
 		if degraded {
 			message = fmt.Sprintf("write committed with degraded redundancy (%d of %d shards stored)", len(stored), redundancy.TotalShards)
+			slog.Warn("write committed degraded",
+				"key", intent.key, "stripe_id", intent.stripeID, "mode", intent.mode.String(),
+				"version", intent.version, "shards_stored", len(stored),
+				"request_id", rpc.RequestID(ctx))
+		} else {
+			slog.Info("write committed",
+				"key", intent.key, "stripe_id", intent.stripeID, "mode", intent.mode.String(),
+				"version", intent.version, "shards_stored", len(stored),
+				"request_id", rpc.RequestID(ctx))
 		}
 		return &pb.PutResponse{
 			Success:      true,

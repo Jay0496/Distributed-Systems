@@ -3,7 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"distributed-kv-store/internal/cluster"
@@ -78,8 +78,9 @@ func (s *Server) repair(ctx context.Context, req *pb.RepairRequest) (*pb.RepairR
 			Priority:   priority,
 		}
 		if err := s.repairQueue.Enqueue(task); err != nil {
-			log.Printf("repair: enqueue rejected key=%s stripe=%s shard=%d error=%v",
-				meta.Key, meta.StripeID, placement.ShardIndex, err)
+			slog.Warn("repair enqueue rejected",
+				"key", meta.Key, "stripe_id", meta.StripeID,
+				"shard_index", placement.ShardIndex, "error", err)
 			continue
 		}
 		accepted++

@@ -13,12 +13,23 @@ RUN go mod download
 
 COPY . .
 
+ARG VERSION=v1.0.0
+ENV VERSION=${VERSION}
+
 # The server links SQLite through CGO. The CLI tools are pure Go so they can be
 # built with CGO disabled and start without the SQLite shared library.
-RUN CGO_ENABLED=1 go build -trimpath -o /out/server ./cmd/server
-RUN CGO_ENABLED=0 go build -trimpath -o /out/gateway ./cmd/gateway
-RUN CGO_ENABLED=0 go build -trimpath -o /out/healthcheck ./cmd/healthcheck
-RUN CGO_ENABLED=0 go build -trimpath -o /out/bench ./cmd/bench
+RUN CGO_ENABLED=1 go build -trimpath \
+    -ldflags "-X distributed-kv-store/internal/version.Version=${VERSION}" \
+    -o /out/server ./cmd/server
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-X distributed-kv-store/internal/version.Version=${VERSION}" \
+    -o /out/gateway ./cmd/gateway
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-X distributed-kv-store/internal/version.Version=${VERSION}" \
+    -o /out/healthcheck ./cmd/healthcheck
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-X distributed-kv-store/internal/version.Version=${VERSION}" \
+    -o /out/bench ./cmd/bench
 
 # ---- runtime stage ---------------------------------------------------------
 FROM alpine:3.19

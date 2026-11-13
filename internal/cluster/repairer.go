@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,7 +71,9 @@ func NewRepairer(opts RepairerOptions) *Repairer {
 		opts.RateLimit = 20
 	}
 	if opts.Logf == nil {
-		opts.Logf = log.Printf
+		opts.Logf = func(format string, args ...any) {
+			slog.Info(fmt.Sprintf(format, args...))
+		}
 	}
 	if opts.Nodes == nil {
 		opts.Nodes = []string{}

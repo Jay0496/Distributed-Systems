@@ -44,8 +44,13 @@ const (
 
 // Admin defaults. CLUSTER_PROBE_TIMEOUT bounds one ClusterHealth probe of one
 // node. AUTH_TOKEN, when non-empty, is attached to outbound internal RPCs and
-// requires an authorizer; server-side enforcement lands in task 10.
-const DefaultClusterProbeTimeout = 1 * time.Second
+// requires an authorizer. SHUTDOWN_TIMEOUT bounds gRPC drain before a forced
+// stop, and LOG_FORMAT selects JSON or text structured logging.
+const (
+	DefaultClusterProbeTimeout = 1 * time.Second
+	DefaultShutdownTimeout     = 30 * time.Second
+	DefaultLogFormat           = "text"
+)
 
 // Failure management defaults. The detector probes every DETECT_INTERVAL with
 // DETECT_TIMEOUT, marks a node down after DETECT_FAILURES consecutive failures,
@@ -115,8 +120,12 @@ type Config struct {
 	// (default 1s).
 	ClusterProbeTimeout time.Duration
 	// AuthToken is the shared bearer token attached to outbound internal
-	// RPCs. Empty disables auth. Task 10 adds server-side enforcement.
+	// RPCs. Empty disables auth.
 	AuthToken string
+	// ShutdownTimeout bounds gRPC drain before a forced stop (default 30s).
+	ShutdownTimeout time.Duration
+	// LogFormat is "json" in containers and "text" locally (default text).
+	LogFormat string
 
 	// DetectInterval is the failure-detector probe period (default 2s).
 	DetectInterval time.Duration
@@ -252,6 +261,8 @@ func Load() Config {
 		ReadRepairWorkers:   intOr("READ_REPAIR_WORKERS", DefaultReadRepairWorkers),
 		ClusterProbeTimeout: durationOr("CLUSTER_PROBE_TIMEOUT", DefaultClusterProbeTimeout),
 		AuthToken:           strings.TrimSpace(os.Getenv("AUTH_TOKEN")),
+		ShutdownTimeout:     durationOr("SHUTDOWN_TIMEOUT", DefaultShutdownTimeout),
+		LogFormat:           envOr("LOG_FORMAT", DefaultLogFormat),
 		DetectInterval:      durationOr("DETECT_INTERVAL", DefaultDetectInterval),
 		DetectTimeout:       durationOr("DETECT_TIMEOUT", DefaultDetectTimeout),
 		DetectFailures:      intOr("DETECT_FAILURES", DefaultDetectFailures),
@@ -310,6 +321,12 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.ClusterProbeTimeout <= 0 {
 		c.ClusterProbeTimeout = DefaultClusterProbeTimeout
+	}
+	if c.ShutdownTimeout <= 0 {
+		c.ShutdownTimeout = DefaultShutdownTimeout
+	}
+	if strings.TrimSpace(c.LogFormat) == "" {
+		c.LogFormat = DefaultLogFormat
 	}
 	if c.DetectInterval <= 0 {
 		c.DetectInterval = DefaultDetectInterval

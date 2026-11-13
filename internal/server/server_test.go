@@ -36,9 +36,9 @@ type testNode struct {
 	node      *consensus.Node
 	srv       *Server
 
-	lis       *bufconn.Listener
-	grpcSrv   *grpc.Server
-	conn      *grpc.ClientConn
+	lis          *bufconn.Listener
+	grpcSrv      *grpc.Server
+	conn         *grpc.ClientConn
 	healthSrv    *health.Server
 	healthCancel context.CancelFunc
 

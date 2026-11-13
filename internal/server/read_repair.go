@@ -3,11 +3,12 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"distributed-kv-store/internal/cluster"
 	"distributed-kv-store/internal/consensus"
 	"distributed-kv-store/internal/redundancy"
+	"distributed-kv-store/internal/rpc"
 	"distributed-kv-store/internal/storage"
 
 	pb "distributed-kv-store/proto"
@@ -30,7 +31,7 @@ type RepairQueue interface {
 // enqueueReadRepair schedules one best-effort task per failed placement. It
 // returns true when at least one task was accepted. The read response never
 // waits for repair.
-func (s *Server) enqueueReadRepair(meta storage.KeyMeta, _ []byte, failed []ShardRef) bool {
+func (s *Server) enqueueReadRepair(ctx context.Context, meta storage.KeyMeta, _ []byte, failed []ShardRef) bool {
 	if len(failed) == 0 || s.repairQueue == nil {
 		return false
 	}
@@ -47,14 +48,17 @@ func (s *Server) enqueueReadRepair(meta storage.KeyMeta, _ []byte, failed []Shar
 			Priority:   cluster.PriorityReadRepair,
 		}
 		if err := s.repairQueue.Enqueue(task); err != nil {
-			log.Printf("read: repair not queued key=%s stripe=%s shard=%d error=%v",
-				meta.Key, meta.StripeID, ref.ShardIndex, err)
+			slog.Warn("read repair not queued",
+				"key", meta.Key, "stripe_id", meta.StripeID, "shard_index", ref.ShardIndex,
+				"error", err, "request_id", rpc.RequestID(ctx))
 			continue
 		}
 		accepted = true
 	}
 	if accepted {
-		log.Printf("read: repair queued key=%s stripe=%s shards=%d", meta.Key, meta.StripeID, len(failed))
+		slog.Info("read repair queued",
+			"key", meta.Key, "stripe_id", meta.StripeID, "shards", len(failed),
+			"request_id", rpc.RequestID(ctx))
 	}
 	return accepted
 }

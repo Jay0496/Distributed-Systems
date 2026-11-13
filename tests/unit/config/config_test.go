@@ -32,6 +32,8 @@ func clearConfigEnv(t *testing.T) {
 		"READ_REPAIR_WORKERS",
 		"CLUSTER_PROBE_TIMEOUT",
 		"AUTH_TOKEN",
+		"SHUTDOWN_TIMEOUT",
+		"LOG_FORMAT",
 		"BOOTSTRAP",
 		"JOIN_ADDR",
 		"TLS_ENABLED",
@@ -71,6 +73,12 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.StoreBusyTimeout != 5*time.Second {
 		t.Errorf("StoreBusyTimeout = %v, want 5s", cfg.StoreBusyTimeout)
+	}
+	if cfg.ShutdownTimeout != config.DefaultShutdownTimeout {
+		t.Errorf("ShutdownTimeout = %v, want %v", cfg.ShutdownTimeout, config.DefaultShutdownTimeout)
+	}
+	if cfg.LogFormat != config.DefaultLogFormat {
+		t.Errorf("LogFormat = %q, want %q", cfg.LogFormat, config.DefaultLogFormat)
 	}
 	if cfg.MaxFragmentSize != config.DefaultMaxFragmentSize {
 		t.Errorf("MaxFragmentSize = %d, want %d", cfg.MaxFragmentSize, config.DefaultMaxFragmentSize)
@@ -143,6 +151,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("READ_REPAIR_WORKERS", "4")
 	t.Setenv("CLUSTER_PROBE_TIMEOUT", "750ms")
 	t.Setenv("AUTH_TOKEN", "  secret-token  ")
+	t.Setenv("SHUTDOWN_TIMEOUT", "12s")
+	t.Setenv("LOG_FORMAT", "json")
 	t.Setenv("BOOTSTRAP", "true")
 	t.Setenv("JOIN_ADDR", "node1:50051")
 	t.Setenv("TLS_ENABLED", "true")
@@ -205,6 +215,12 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 	if cfg.AuthToken != "secret-token" {
 		t.Errorf("AuthToken = %q, want secret-token", cfg.AuthToken)
+	}
+	if cfg.ShutdownTimeout != 12*time.Second {
+		t.Errorf("ShutdownTimeout = %v, want 12s", cfg.ShutdownTimeout)
+	}
+	if cfg.LogFormat != "json" {
+		t.Errorf("LogFormat = %q, want json", cfg.LogFormat)
 	}
 	if !cfg.Bootstrap {
 		t.Error("Bootstrap = false, want true")
