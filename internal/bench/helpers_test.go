@@ -69,7 +69,7 @@ func (f *fakeAPI) Stats(context.Context, *pb.StatsRequest, ...grpc.CallOption) (
 	return &pb.StatsResponse{
 		Keys:          f.stats.Keys,
 		Stripes:       f.stats.Stripes,
-		Fragments:     f.stats.Fragments,
+		Fragments:     f.stats.Fragments + uint64(f.puts),
 		FragmentBytes: f.stats.FragmentBytes,
 		StorageBytes:  f.stats.StorageBytes,
 	}, nil

@@ -29,6 +29,10 @@ type Dataset struct {
 	Keys         []string
 	ValueSize    int
 	LogicalBytes int64
+	// BaselineFragments is the cluster-wide fragment count before this dataset
+	// was written. Recovery seeds into a non-empty cluster, so verification
+	// must compare against a baseline rather than assume an empty store.
+	BaselineFragments uint64
 }
 
 // Normalize validates dataset options.
@@ -94,6 +98,11 @@ func WriteDataset(ctx context.Context, nodes Nodes, opts DatasetOptions) (*Datas
 		ValueSize:    normalized.ValueSize,
 		LogicalBytes: int64(normalized.Values) * int64(normalized.ValueSize),
 	}
+	baseline, err := fragmentTotal(ctx, nodes)
+	if err != nil {
+		return nil, err
+	}
+	dataset.BaselineFragments = baseline
 	rng := rand.New(rand.NewSource(normalized.Seed))
 	for i := 0; i < normalized.Values; i++ {
 		key := fmt.Sprintf("%s-%06d", normalized.Prefix, i)
@@ -119,36 +128,45 @@ func VerifyFragments(ctx context.Context, nodes Nodes, dataset *Dataset, timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	want := uint64(len(dataset.Keys)) * 5
+	want := dataset.BaselineFragments + uint64(len(dataset.Keys))*5
 	deadline := time.Now().Add(timeout)
 	var last string
 	for {
-		var total uint64
-		for _, node := range nodes {
-			callCtx, cancel := WithTimeout(ctx, 5*time.Second)
-			stats, err := node.API.Stats(callCtx, &pb.StatsRequest{})
-			cancel()
-			if err != nil {
-				last = fmt.Sprintf("%s: %v", node.ID, err)
-				total = 0
-				break
+		total, err := fragmentTotal(ctx, nodes)
+		if err == nil {
+			if total >= want {
+				return nil
 			}
-			total += stats.GetFragments()
-		}
-		if total == want {
-			return nil
+		} else {
+			last = err.Error()
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if time.Now().After(deadline) {
 			if last == "" {
-				last = fmt.Sprintf("found %d fragments, want %d", total, want)
+				last = fmt.Sprintf("found %d fragments, want at least %d", total, want)
 			}
 			return fmt.Errorf("timed out waiting for %d fragments: %s", want, last)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// fragmentTotal sums the local fragment count across the cluster. Every node
+// reports its own SQLite table, so the sum is the cluster-wide fragment count.
+func fragmentTotal(ctx context.Context, nodes Nodes) (uint64, error) {
+	var total uint64
+	for _, node := range nodes {
+		callCtx, cancel := WithTimeout(ctx, 5*time.Second)
+		stats, err := node.API.Stats(callCtx, &pb.StatsRequest{})
+		cancel()
+		if err != nil {
+			return 0, fmt.Errorf("stats on %s: %w", node.ID, err)
+		}
+		total += stats.GetFragments()
+	}
+	return total, nil
 }
 
 // MeasureStorage writes a dataset, forces a Raft snapshot and a SQLite WAL
