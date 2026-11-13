@@ -266,6 +266,21 @@ CGO and `gcc` are included in the `golang` image; do not disable CGO for SQLite
 tests. The scripts do not start Compose. Use `scripts/test.ps1 -Integration`
 when a live cluster is available.
 
+## Documentation checks
+
+The documentation set has its own deterministic guard:
+
+```powershell
+./scripts/check-docs.ps1
+./scripts/check-docs.sh
+```
+
+It resolves every relative Markdown link, prints `<!-- runnable -->`
+PowerShell/bash blocks for manual execution, and fails on removed code names and
+unfinished-work markers. It does not run Go tests or start Compose. Run it after
+changing `tests/README.md` or any file under `docs/`. The detailed testing guide
+is [docs/TESTING.md](../docs/TESTING.md).
+
 ## Troubleshooting
 
 | Symptom | Fix |

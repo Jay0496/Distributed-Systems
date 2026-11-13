@@ -23,6 +23,7 @@ white-box exception list live in [tests/README.md](../tests/README.md).
 | Compose checks | `go test -tags=integration -count=1 ./tests/integration/...` |
 | Flakiness check | `go test -race -count=3 ./tests/...` |
 | Full local check suite | `./scripts/check.ps1` or `./scripts/check.sh` |
+| Documentation check | `./scripts/check-docs.ps1` or `./scripts/check-docs.sh` |
 
 The script runner wraps cluster startup, health waiting, the pinned network name,
 and `AUTH_TOKEN`:
@@ -311,6 +312,34 @@ suite, and a `gofmt` check. The format check copies the working tree into the
 container and normalizes CRLF first, so a Windows checkout does not report every
 untouched file. CGO is required for `mattn/go-sqlite3`; the `golang` image
 includes `gcc`, so do not disable it. The local checks do not start Compose.
+
+## Documentation checks
+
+`scripts/check-docs.ps1` and `check-docs.sh` are the guard against stale docs.
+They do not run tests or start Docker:
+
+```powershell
+./scripts/check-docs.ps1
+```
+
+```bash
+./scripts/check-docs.sh
+```
+
+They scan every Markdown file outside `.git` and `.opencode` and:
+
+1. resolve every relative Markdown link (fragments are ignored, external URLs
+   are skipped);
+2. print each fenced `powershell` or `bash` block tagged with
+   `<!-- runnable -->`, so the acceptance run can execute them manually;
+3. fail on removed constructor names, the old single-file entrypoint command,
+   the retired router constructor, unfinished-work markers, and the obsolete
+   legacy table name.
+
+The check is deterministic and intentionally small. It reports `file:line` for
+each problem and exits non-zero. Run it before committing documentation changes
+and as part of the Task 14 acceptance run. On Windows, the PowerShell script is
+first-class; the bash script assumes an LF checkout.
 
 ## Known costs and troubleshooting
 

@@ -97,16 +97,105 @@ The runtime image includes the `sqlite` CLI specifically so operators can inspec
 fresh, use `./scripts/reset.ps1` (or `./scripts/reset.ps1 -Build` to rebuild the
 image). The reset prints exactly what it will delete first.
 
+### SQLite inspection
+
+```powershell
+docker compose exec node1 sqlite3 /data/node.db ".tables"
+docker compose exec node1 sqlite3 /data/node.db "select count(*) from fragments;"
+docker compose exec node1 sqlite3 /data/node.db "select key, mode, version, degraded from keys;"
+docker compose exec node1 sqlite3 /data/node.db "select stripe_id, shard_index, node_id from placements order by stripe_id, shard_index;"
+```
+
+The tables are `keys`, `stripes`, `placements`, `fragments`, `cluster_config`,
+and `raft_state`, plus the transitional `store` table retained for upgrade
+compatibility until the final cleanup. The runtime image includes the `sqlite` CLI so operators do
+not need host tools. Treat these queries as read-only: editing metadata by hand
+can desynchronize it from Raft and from the fragments on the other nodes.
+
+### Backup and restore
+
+`node.db` is the authoritative local state for metadata and fragments on that
+node. `raft.db` is rebuildable from peers and snapshots. `snapshots/` contains
+Raft snapshots, which are **metadata only**.
+
+#### Logical node backup
+
+The safest per-node backup is a SQLite online backup while the node is running:
+
+```powershell
+docker compose exec node1 sqlite3 /data/node.db ".backup '/data/backup.db'"
+docker cp node1:/data/backup.db ./node1-backup.db
+docker compose exec node1 rm /data/backup.db
+```
+
+The `.backup` command produces a consistent single file without stopping the
+node. It includes both metadata and that node's local fragments.
+
+For a consistent set across all five nodes, stop the cluster first and copy each
+volume. Do not copy `node.db` alone while writes are in flight; a plain file copy
+can miss the WAL.
+
+```powershell
+./scripts/down.ps1
+docker run --rm -v distributed-systems_node1-data:/data -v "${PWD}:/backup" `
+  alpine tar czf /backup/node1-data.tgz -C /data .
+```
+
+#### Restore
+
+Stop the node, replace `node.db` (and remove stale `node.db-wal`/`node.db-shm`),
+then start it:
+
+```powershell
+docker compose stop node1
+docker cp ./node1-backup.db node1:/data/node.db
+docker run --rm -v distributed-systems_node1-data:/data alpine `
+  rm -f /data/node.db-wal /data/node.db-shm
+docker compose start node1
+```
+
+`docker compose exec` only works on a running container, so the WAL cleanup runs
+in a throwaway container attached to the same volume. Repeat the copy for each
+node when restoring a set.
+
+If the restored metadata references fragments that are not in the local
+database, the leader's repairer refills them from live peers. That is expected.
+
+#### Metadata-only snapshot caveat
+
+Raft snapshots deliberately exclude fragment payloads. A restore that uses only
+`node.db` metadata, or only a Raft snapshot, gives the cluster the key map but
+not the shard bytes. Fragments are repaired from peers when enough peers still
+hold the stripe; if every copy of a shard is gone, the value is unrecoverable.
+
+Therefore:
+
+- Back up `node.db` for each node, not just one node's metadata.
+- Never treat `snapshots/` as a complete data backup.
+- After a single-node restore, wait for `degraded=false` before declaring the
+  node healthy.
+- A whole-cluster restore must restore all five node databases from the same
+  point in time, or accept that repair can only recover stripes with at least
+  three surviving shards (RS) or one surviving copy (replication).
+
 ### Troubleshooting
 
 | Symptom | Likely cause / fix |
 | --- | --- |
-| `up` times out with fewer than five healthy nodes | Run `docker compose ps` and `docker compose logs --tail 100 node1`; check port conflicts on 50051-50055 or 60051-60055 |
+| `up` times out with fewer than five healthy nodes | Run `docker compose ps` and `docker compose logs --tail 100 node1`; check port conflicts on 50051-50055 or 60051-60055 and give startup more time with `-Timeout` / `--timeout` |
 | Script reports `docker compose (v2) is unavailable` | Install the Compose plugin; `docker compose version` must succeed |
-| `node.db` or `raft.db` lock timeout | An old container still holds the volume; stop it and retry |
+| `node.db` or `raft.db` lock timeout | An old container still holds the volume; stop it and retry. `create bolt store: timeout` means a previous Raft process did not close `raft.db` |
+| A node is unhealthy but the cluster still serves | The detector reports degraded; check `docker compose logs nodeN`, the Raft port, and the volume lock. Repair for that node starts automatically after it returns |
+| No leader / election loops | Confirm exactly one node has `BOOTSTRAP=true`, `BOOTSTRAP_SERVERS` lists all five nodes identically, and all five Raft ports are reachable. Check `gateway status` and `docker compose logs` |
+| Writes return "not the leader" | `PEERS` is missing or has the wrong gRPC addresses, so a follower cannot forward. Compare `PEERS` with the Compose node ports |
+| Repair backlog keeps growing | Check `gateway status` repair queue, `gateway stats` failed count, and whether three RS shards or one replication copy survive. A sub-quorum repair cannot reconstruct; start more nodes |
+| `degraded=true` never clears | Run `gateway repair <key> --force`, then inspect logs for repeated owner dial errors. Repair clears only when all five intended placements verify |
+| Port 5005x or 6005x already in use | Stop the conflicting process or change the published port; inside Compose the container ports must still match `PORT` and `RAFT_PORT` |
 | Integration tests cannot resolve `node1` | Run through `./scripts/test.ps1 -Integration` or use `--network distributed-systems_cluster-net` |
 | Data appears missing after changing the directory name | The project name is now pinned; check `docker volume ls` and migrate or reset |
 | `AUTH_TOKEN` mismatch | Set the same value for the host, every node, the gateway, and test containers; restart the cluster after changing it |
+| Windows path or line-ending error | Use `./scripts/*.ps1` rather than hand-written Docker mounts, quote `${PWD}`, and keep the checkout on one drive. `gofmt` CRLF false positives are handled by `scripts/format-check.sh` |
+| `cannot create /data/node.db: permission denied` on Windows | Docker Desktop file sharing is disabled for that drive, or the volume is owned by another container; reset the volume or re-enable sharing |
 
 ## What healthy looks like
 
