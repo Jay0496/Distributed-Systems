@@ -17,10 +17,11 @@ while [[ $# -gt 0 ]]; do
         --integration) integration=1; shift ;;
         --chaos) chaos=1; shift ;;
         --bench) bench=1; shift ;;
+        --all) unit=1; integration=1; chaos=1; bench=1; shift ;;
         --keep) keep=1; shift ;;
         --timeout) [[ $# -ge 2 ]] || die '--timeout requires a value'; timeout="$2"; shift 2 ;;
         --help|-h)
-            show_help 'Usage: scripts/test.sh [--unit] [--integration] [--chaos] [--bench] [--keep] [--timeout SECONDS] [--help]
+            show_help 'Usage: scripts/test.sh [--unit] [--integration] [--chaos] [--bench] [--all] [--keep] [--timeout SECONDS] [--help]
 
 Runs Go tests inside golang:1.22 containers. No host Go installation is needed.
 
@@ -30,6 +31,7 @@ Suites (combine flags to run more than one; --unit is the default):
                   integration-tagged suite on distributed-systems_cluster-net
   --chaos         runs the chaos-tagged failure suite
   --bench         runs the benchmark-tagged suite
+  --all           runs unit, integration, chaos, and bench
 
 Options:
   --keep              Leave a cluster started by this script running

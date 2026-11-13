@@ -9,10 +9,10 @@ import (
 	"distributed-kv-store/internal/storage"
 )
 
-// MockStore is an in-memory implementation of storage.Store for tests. It is
+// MemoryStore is an in-memory implementation of storage.Store for tests. It is
 // deliberately kept out of production packages; package-internal tests use
 // their own minimal doubles to avoid import cycles.
-type MockStore struct {
+type MemoryStore struct {
 	mu        sync.RWMutex
 	keys      map[string]storage.KeyMeta
 	stripes   map[string]struct{}
@@ -23,18 +23,18 @@ type MockStore struct {
 	closed    bool
 }
 
-// NewMockStore creates a new empty MockStore.
-func NewMockStore() *MockStore {
-	return &MockStore{
+// NewMemoryStore creates a new empty MemoryStore.
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{
 		keys:      make(map[string]storage.KeyMeta),
 		stripes:   make(map[string]struct{}),
 		fragments: make(map[string]map[int]storage.Fragment),
 	}
 }
 
-var _ storage.Store = (*MockStore)(nil)
+var _ storage.Store = (*MemoryStore)(nil)
 
-func (m *MockStore) ready() error {
+func (m *MemoryStore) ready() error {
 	if m == nil || m.closed {
 		return storage.ErrClosed
 	}
@@ -57,14 +57,14 @@ func copyMeta(meta storage.KeyMeta) storage.KeyMeta {
 }
 
 // Ping reports ErrClosed after Close.
-func (m *MockStore) Ping() error {
+func (m *MemoryStore) Ping() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.ready()
 }
 
 // ApplyPutMeta installs metadata and returns the previous record.
-func (m *MockStore) ApplyPutMeta(raftIndex uint64, meta storage.KeyMeta) (storage.KeyMeta, error) {
+func (m *MemoryStore) ApplyPutMeta(raftIndex uint64, meta storage.KeyMeta) (storage.KeyMeta, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ready(); err != nil {
@@ -98,7 +98,7 @@ func (m *MockStore) ApplyPutMeta(raftIndex uint64, meta storage.KeyMeta) (storag
 }
 
 // ApplyMetaStatus updates the degraded flag for an existing stripe version.
-func (m *MockStore) ApplyMetaStatus(raftIndex uint64, key, stripeID string, version int64, degraded bool) (storage.KeyMeta, error) {
+func (m *MemoryStore) ApplyMetaStatus(raftIndex uint64, key, stripeID string, version int64, degraded bool) (storage.KeyMeta, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ready(); err != nil {
@@ -122,7 +122,7 @@ func (m *MockStore) ApplyMetaStatus(raftIndex uint64, key, stripeID string, vers
 }
 
 // ApplyDeleteMeta removes a key and returns its old metadata.
-func (m *MockStore) ApplyDeleteMeta(raftIndex uint64, key string, expectedVersion int64) (storage.KeyMeta, error) {
+func (m *MemoryStore) ApplyDeleteMeta(raftIndex uint64, key string, expectedVersion int64) (storage.KeyMeta, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ready(); err != nil {
@@ -148,7 +148,7 @@ func (m *MockStore) ApplyDeleteMeta(raftIndex uint64, key string, expectedVersio
 }
 
 // ApplySetConfig stores the singleton config and advances the applied index.
-func (m *MockStore) ApplySetConfig(raftIndex uint64, cfg storage.ClusterConfig) error {
+func (m *MemoryStore) ApplySetConfig(raftIndex uint64, cfg storage.ClusterConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ready(); err != nil {
@@ -164,7 +164,7 @@ func (m *MockStore) ApplySetConfig(raftIndex uint64, cfg storage.ClusterConfig) 
 }
 
 // GetKey returns committed metadata for a key.
-func (m *MockStore) GetKey(key string) (storage.KeyMeta, error) {
+func (m *MemoryStore) GetKey(key string) (storage.KeyMeta, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if err := m.ready(); err != nil {
@@ -178,7 +178,7 @@ func (m *MockStore) GetKey(key string) (storage.KeyMeta, error) {
 }
 
 // ListKeys returns all key metadata ordered by key.
-func (m *MockStore) ListKeys() ([]storage.KeyMeta, error) {
+func (m *MemoryStore) ListKeys() ([]storage.KeyMeta, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if err := m.ready(); err != nil {
@@ -199,7 +199,7 @@ func (m *MockStore) ListKeys() ([]storage.KeyMeta, error) {
 }
 
 // LastAppliedIndex returns the last applied metadata index.
-func (m *MockStore) LastAppliedIndex() (uint64, error) {
+func (m *MemoryStore) LastAppliedIndex() (uint64, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if err := m.ready(); err != nil {
@@ -209,7 +209,7 @@ func (m *MockStore) LastAppliedIndex() (uint64, error) {
 }
 
 // PutFragment stores a fragment snapshot.
-func (m *MockStore) PutFragment(frag storage.Fragment) error {
+func (m *MemoryStore) PutFragment(frag storage.Fragment) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ready(); err != nil {
@@ -230,7 +230,7 @@ func (m *MockStore) PutFragment(frag storage.Fragment) error {
 }
 
 // GetFragment returns one fragment.
-func (m *MockStore) GetFragment(stripeID string, shardIndex int) (storage.Fragment, error) {
+func (m *MemoryStore) GetFragment(stripeID string, shardIndex int) (storage.Fragment, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if err := m.ready(); err != nil {
@@ -245,7 +245,7 @@ func (m *MockStore) GetFragment(stripeID string, shardIndex int) (storage.Fragme
 }
 
 // DeleteFragment removes one fragment.
-func (m *MockStore) DeleteFragment(stripeID string, shardIndex int) error {
+func (m *MemoryStore) DeleteFragment(stripeID string, shardIndex int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ready(); err != nil {
@@ -256,7 +256,7 @@ func (m *MockStore) DeleteFragment(stripeID string, shardIndex int) error {
 }
 
 // DeleteStripe removes a stripe's metadata, placements, and fragments.
-func (m *MockStore) DeleteStripe(stripeID string) error {
+func (m *MemoryStore) DeleteStripe(stripeID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ready(); err != nil {
@@ -274,7 +274,7 @@ func (m *MockStore) DeleteStripe(stripeID string) error {
 
 // ListFragments returns fragment metadata for a stripe, or every local
 // fragment when stripeID is empty.
-func (m *MockStore) ListFragments(stripeID string) ([]storage.FragmentRef, error) {
+func (m *MemoryStore) ListFragments(stripeID string) ([]storage.FragmentRef, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if err := m.ready(); err != nil {
@@ -307,7 +307,7 @@ func (m *MockStore) ListFragments(stripeID string) ([]storage.FragmentRef, error
 }
 
 // PutConfig stores the singleton config for seeding and tests.
-func (m *MockStore) PutConfig(cfg storage.ClusterConfig) error {
+func (m *MemoryStore) PutConfig(cfg storage.ClusterConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ready(); err != nil {
@@ -319,7 +319,7 @@ func (m *MockStore) PutConfig(cfg storage.ClusterConfig) error {
 }
 
 // GetConfig returns the singleton config.
-func (m *MockStore) GetConfig() (storage.ClusterConfig, error) {
+func (m *MemoryStore) GetConfig() (storage.ClusterConfig, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if err := m.ready(); err != nil {
@@ -332,7 +332,7 @@ func (m *MockStore) GetConfig() (storage.ClusterConfig, error) {
 }
 
 // Stats reports in-memory usage.
-func (m *MockStore) Stats() (storage.StoreStats, error) {
+func (m *MemoryStore) Stats() (storage.StoreStats, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if err := m.ready(); err != nil {
@@ -353,7 +353,7 @@ func (m *MockStore) Stats() (storage.StoreStats, error) {
 }
 
 // Close marks the store closed.
-func (m *MockStore) Close() error {
+func (m *MemoryStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.closed = true

@@ -10,8 +10,8 @@ import (
 	"distributed-kv-store/tests/support"
 )
 
-func TestMockStoreFragmentRoundTrip(t *testing.T) {
-	store := support.NewMockStore()
+func TestMemoryStoreFragmentRoundTrip(t *testing.T) {
+	store := support.NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })
 
 	frag := storage.Fragment{
@@ -32,8 +32,8 @@ func TestMockStoreFragmentRoundTrip(t *testing.T) {
 	}
 }
 
-func TestMockStoreMissingFragment(t *testing.T) {
-	store := support.NewMockStore()
+func TestMemoryStoreMissingFragment(t *testing.T) {
+	store := support.NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })
 
 	if _, err := store.GetFragment("missing", 0); !errors.Is(err, storage.ErrNotFound) {
@@ -41,8 +41,8 @@ func TestMockStoreMissingFragment(t *testing.T) {
 	}
 }
 
-func TestMockStoreCopiesFragments(t *testing.T) {
-	store := support.NewMockStore()
+func TestMemoryStoreCopiesFragments(t *testing.T) {
+	store := support.NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })
 
 	input := []byte("original")
@@ -66,8 +66,8 @@ func TestMockStoreCopiesFragments(t *testing.T) {
 	}
 }
 
-func TestMockStoreMetadata(t *testing.T) {
-	store := support.NewMockStore()
+func TestMemoryStoreMetadata(t *testing.T) {
+	store := support.NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })
 
 	meta := testMeta("alpha", "stripe-1", 1, []byte("value"), "rs32")
@@ -83,8 +83,8 @@ func TestMockStoreMetadata(t *testing.T) {
 	}
 }
 
-func TestMockStoreConcurrentAccess(t *testing.T) {
-	store := support.NewMockStore()
+func TestMemoryStoreConcurrentAccess(t *testing.T) {
+	store := support.NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })
 
 	var wg sync.WaitGroup

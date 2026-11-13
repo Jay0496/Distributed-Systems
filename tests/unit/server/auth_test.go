@@ -155,7 +155,7 @@ func TestHealthCheckIsExemptFromAuth(t *testing.T) {
 }
 
 func TestCheckAuthRequiresInterceptors(t *testing.T) {
-	store := support.NewMockStore()
+	store := support.NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })
 
 	open := server.New(config.Config{}, store, nil, nil)

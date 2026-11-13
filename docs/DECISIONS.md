@@ -413,27 +413,25 @@ distinct placements whose parity flags match the mode. Apply returns typed
 `Result` values (`conflict`, `invalid`, `not_found`, `internal`) rather than Go
 errors so a rejected command can never look like a Raft failure.
 
-The transitional `put`/`get` commands still carry values, but the payload is
-isolated in a nested `LegacyOp` so metadata commands have no value-shaped field.
-They are exempt from the size guard only while the transition lasts. The write
-path stopped writing them in task 06; task 15 removes them and the legacy
-snapshot section.
+The command envelope has no value-shaped field. The previous full-value
+`put`/`get` commands and their nested payload were removed once every write and
+read used metadata plus fragments, so the 64 KiB guard covers every accepted
+command.
 
-Snapshots use an FSM-owned envelope with `schema_version: 2`:
+Snapshots use an FSM-owned envelope with `schema_version: 3`:
 
 ```json
 {
-  "schema_version": 2,
-  "metadata": { "stripes": [], "keys": [], "config": {}, "last_applied_index": 0 },
-  "legacy": []
+  "schema_version": 3,
+  "metadata": { "stripes": [], "keys": [], "config": {}, "last_applied_index": 0 }
 }
 ```
 
 The metadata section is the SQLite metadata payload, including
-`last_applied_index`; the legacy section is the transitional KV payload. Restore
-runs both sections in one SQLite transaction when the store supports it, rejects
-unknown schema versions, and still reads version 1 snapshots for upgrade safety.
-Metadata snapshots never include fragment payloads.
+`last_applied_index`. Restore writes it in one SQLite transaction and rejects
+unknown schema versions. Version 2 snapshots are accepted only when their
+transitional legacy section is empty; a non-empty section fails with an export
+instruction. Metadata snapshots never include fragment payloads.
 
 ### Rationale
 
@@ -468,9 +466,9 @@ Metadata snapshots never include fragment payloads.
   upload and metadata commit leaves orphan fragments for the local sweep; a
   crash after metadata commit but before all fragment uploads is recorded as
   `degraded` and repaired later.
-- The version 2 snapshot temporarily carries both metadata and legacy sections,
-  so the FSM must keep the compatibility path until the legacy commands are
-  removed.
+- The snapshot schema is version 3 and metadata-only. Versions 1 and 2 remain
+  readable for upgrade safety, but a non-empty legacy section fails with an
+  export instruction rather than dropping values.
 
 ### Alternatives considered
 
@@ -840,9 +838,10 @@ Use SQLite (`mattn/go-sqlite3`) as the production store on every node:
 - `STORE_PATH` defaults to `${DATA_DIR}/node.db`.
 - Open with `PRAGMA foreign_keys = ON`, WAL journaling, a bounded connection
   pool, and `STORE_BUSY_TIMEOUT` for lock waits.
-- Schema migrations are additive. Tables are `keys`, `stripes`, `placements`,
-  `fragments`, `cluster_config`, and `raft_state`, plus the transitional
-  `store` table retained for upgrade compatibility.
+- Schema migrations are additive. Tables are `schema_migrations`, `keys`,
+  `stripes`, `placements`, `fragments`, `cluster_config`, and `raft_state`. The
+  transitional `store` table is dropped only when empty; a non-empty table fails
+  startup with an export instruction.
 - Metadata and local fragments share the database but are separate
   repositories behind the `storage.Store` interface.
 - Raft snapshots export metadata only. Fragment payloads are durable on their

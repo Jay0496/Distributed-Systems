@@ -332,9 +332,8 @@ They scan every Markdown file outside `.git` and `.opencode` and:
    are skipped);
 2. print each fenced `powershell` or `bash` block tagged with
    `<!-- runnable -->`, so the acceptance run can execute them manually;
-3. fail on removed constructor names, the old single-file entrypoint command,
-   the retired router constructor, unfinished-work markers, and the obsolete
-   legacy table name.
+3. fail on the old single-file entrypoint command, the retired router
+   constructor, unfinished-work markers, and the obsolete legacy table name.
 
 The check is deterministic and intentionally small. It reports `file:line` for
 each problem and exits non-zero. Run it before committing documentation changes

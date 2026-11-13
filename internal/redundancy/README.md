@@ -107,7 +107,7 @@ surviving copy.
 
 ## Integration
 
-The engines are wired into the server write/read path in tasks 06 and 07. Until
-then the transitional FSM still stores full values and the fragment handlers are
-transport scaffolding. Do not add a 3x replication mode: the cluster has exactly
-five nodes and every stripe must use all five.
+The engines are wired into the server write and read paths: the leader encodes,
+uploads fragments out of band, and commits metadata only; reads gather and
+verify enough fragments before returning a value. Do not add a 3x replication
+mode: the cluster has exactly five nodes and every stripe must use all five.

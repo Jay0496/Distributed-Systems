@@ -17,8 +17,8 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
-func TestMockStoreConcurrentAccess(t *testing.T) {
-	store := support.NewMockStore()
+func TestMemoryStoreConcurrentAccess(t *testing.T) {
+	store := support.NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })
 
 	const workers = 64
@@ -150,8 +150,8 @@ func TestClusterHarnessWritesReadsAndRestarts(t *testing.T) {
 	}
 }
 
-func TestMockStoreSentinelErrors(t *testing.T) {
-	store := support.NewMockStore()
+func TestMemoryStoreSentinelErrors(t *testing.T) {
+	store := support.NewMemoryStore()
 	if _, err := store.GetFragment("missing", 0); err == nil {
 		t.Fatal("missing fragment returned no error")
 	}

@@ -106,11 +106,14 @@ docker compose exec node1 sqlite3 /data/node.db "select key, mode, version, degr
 docker compose exec node1 sqlite3 /data/node.db "select stripe_id, shard_index, node_id from placements order by stripe_id, shard_index;"
 ```
 
-The tables are `keys`, `stripes`, `placements`, `fragments`, `cluster_config`,
-and `raft_state`, plus the transitional `store` table retained for upgrade
-compatibility until the final cleanup. The runtime image includes the `sqlite` CLI so operators do
-not need host tools. Treat these queries as read-only: editing metadata by hand
-can desynchronize it from Raft and from the fragments on the other nodes.
+The tables are `schema_migrations`, `keys`, `stripes`, `placements`,
+`fragments`, `cluster_config`, and `raft_state`. A database from an earlier
+release may still contain the transitional `store` table; startup drops it only
+when it is empty. If it holds values, startup fails with an export instruction
+instead of discarding them. The runtime image includes the `sqlite` CLI so
+operators do not need host tools. Treat these queries as read-only: editing
+metadata by hand can desynchronize it from Raft and from the fragments on the
+other nodes.
 
 ### Backup and restore
 
