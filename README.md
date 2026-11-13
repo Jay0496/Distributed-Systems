@@ -44,7 +44,7 @@ state layout, and recovery behaviour. Design trade-offs are recorded in
 | `cmd/server/` | Process entrypoint: config loading, Raft/gRPC startup, TLS, health, signals |
 | `cmd/gateway/` | CLI entrypoint: gateway configuration, client construction, command dispatch |
 | `cmd/healthcheck/` | Tiny binary used by Docker Compose health checks |
-| `cmd/bench/` | Benchmark harness placeholder |
+| `cmd/bench/` | Benchmark harness: load generator, storage ratios, recovery timing, reports |
 | `scripts/` | PowerShell and bash wrappers for up, down, reset, demo, test, and bench |
 | `internal/config/` | Environment configuration parsing |
 | `internal/server/` | gRPC handlers: `Put`, `Get`, `Heartbeat`, `Join`, `NodeStatus`, fragments, repair, admin, auth |
@@ -140,7 +140,7 @@ explicitly deletes them.
 | `scripts/reset.ps1` / `reset.sh` | Destructive reset: containers, network, and all five volumes | `-Build` / `--build` |
 | `scripts/demo.ps1` / `demo.sh` | End-to-end RS/replication, failure, repair, and delete demo | `-Mode`, `-SkipFailure`, `-Keep`, `-ValueSize` |
 | `scripts/test.ps1` / `test.sh` | Unit, integration, chaos, and bench suites in Docker | `-Integration`, `-Chaos`, `-Bench`, `-Keep` |
-| `scripts/bench.ps1` / `bench.sh` | Forward arguments to the bench tool (placeholder until task 13) | any bench flags |
+| `scripts/bench.ps1` / `bench.sh` | Load, storage, recovery, and CPU benchmarks in Docker | `-Runs`, `-Duration`, `-Mode`, `-SkipLoad`, `-SkipStorage`, `-SkipRecovery` |
 
 Every script supports `-Help` / `--help`, resolves the repository root from its
 own location, and prints the command it runs. `test` and `demo` start the cluster
@@ -218,6 +218,22 @@ server-internal client send `authorization: Bearer <token>` through the shared
 `/grpc.health.v1.Health/Watch` bypass authentication; see
 [docs/SECURITY.md](docs/SECURITY.md).
 
+## Benchmarks
+
+Measure put/get latency, throughput, RS versus replication storage overhead,
+recovery time, and per-node CPU in one Docker-only command:
+
+```powershell
+./scripts/bench.ps1 -Runs 1 -Duration 15s
+```
+
+Bash equivalent: `./scripts/bench.sh --runs 1 --duration 15s`. Results are
+written under `bench-results/<run-id>/` as raw CSVs, `meta.json`, `run.json`,
+and `summary.md`. Storage measurement resets the five data volumes so the ratio
+starts clean; use `-SkipStorage` for a non-destructive run. See
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md) for methodology, flags, and the
+expected 1.67x RS and 5.00x replication payload ratios.
+
 ## API
 
 | RPC | Purpose |
@@ -227,7 +243,9 @@ server-internal client send `authorization: Bearer <token>` through the shared
 | `Delete(key, expected_version)` | Idempotent metadata delete plus fragment GC; followers forward |
 | `GetConfig()` / `SetConfig(default_mode)` | Read or commit the cluster-wide default mode through Raft |
 | `ClusterHealth()` | Leader, mode, degraded state, and a probe of every voter |
-| `Stats()` | Local storage and repair counters; any node may answer |
+| `Stats()` | Local storage, fragment-byte, and repair counters; any node may answer |
+| `ForceSnapshot()` | Force a local Raft snapshot; benchmark-only, never forwards |
+| `CheckpointStore()` | Truncate the local SQLite WAL and return the remaining size |
 | `Heartbeat(node_id)` | Liveness probe kept for compatibility |
 | `Join(node_id, raft_addr, grpc_addr)` | Ask the leader to add a voter; followers return a leader hint |
 | `NodeStatus()` | Node ID, Raft state, leader, term, commit/applied/last index |
@@ -249,7 +267,7 @@ you:
 ./scripts/test.ps1                 # unit and component tests in Docker
 ./scripts/test.ps1 -Integration    # starts the cluster, waits, runs integration
 ./scripts/test.ps1 -Chaos          # chaos-tagged failure suite
-./scripts/test.ps1 -Bench          # benchmark-tagged suite (placeholder)
+./scripts/test.ps1 -Bench          # bench-tagged harness tests
 ./scripts/test.ps1 -Integration -Keep
 ```
 
@@ -328,7 +346,6 @@ stop the node and remove `node.db` and its `-wal`/`-shm` files.
 
 ## Roadmap
 
-- Expand the benchmark harness and record storage/throughput medians.
 - Complete the documentation set and requirements mapping.
 - Final integration cleanup and release rehearsal.
 - Add certificate provisioning for the optional TLS mode (future work).

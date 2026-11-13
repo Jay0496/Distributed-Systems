@@ -19,6 +19,7 @@ white-box exception list live in [tests/README.md](../tests/README.md).
 | Unit only | `go test -race -count=1 ./tests/unit/...` |
 | In-process integration only | `go test -race -count=1 ./tests/integration/...` |
 | Chaos | `go test -race -tags=chaos -count=1 ./tests/chaos/...` |
+| Bench harness checks | `go test -race -tags=bench -count=1 ./tests/bench/...` |
 | Compose checks | `go test -tags=integration -count=1 ./tests/integration/...` |
 | Flakiness check | `go test -race -count=3 ./tests/...` |
 | Full local check suite | `./scripts/check.ps1` or `./scripts/check.sh` |
@@ -30,7 +31,7 @@ and `AUTH_TOKEN`:
 ./scripts/test.ps1                 # fast suite
 ./scripts/test.ps1 -Integration    # starts Compose when needed
 ./scripts/test.ps1 -Chaos          # chaos suite
-./scripts/test.ps1 -Bench          # benchmark placeholder until task 13
+./scripts/test.ps1 -Bench          # bench-tagged harness checks
 ./scripts/test.ps1 -Integration -Keep
 ```
 
@@ -67,7 +68,8 @@ part of the acceptance run.
   `tests/integration/cluster_test.go`. Never required by `go test ./...`.
 - **`chaos`:** destructive multi-node failure, partition, restart, and repair
   scenarios.
-- **`bench`:** benchmark harness and fixtures added by task 13.
+- **`bench`:** benchmark harness checks that measure storage ratios and run load
+  against the in-process cluster.
 
 Rule: `go test ./...` must pass with no Docker Compose deployment running.
 

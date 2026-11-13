@@ -33,7 +33,8 @@ tests/
     persistence_test.go concurrent_test.go
   chaos/        destructive failure, partition, and restart scenarios (tag `chaos`)
     failure_test.go     partition_test.go   restart_test.go   helpers_test.go
-  bench/        benchmark harness placeholder until task 13
+  bench/        bench-tagged harness checks (tag `bench`)
+    harness_test.go     storage ratios and load against the in-process cluster
 ```
 
 Everything under `tests/` is inside the module, so it may import
@@ -102,7 +103,7 @@ The script runner wraps cluster lifecycle and auth:
 ./scripts/test.ps1                 # fast suite
 ./scripts/test.ps1 -Integration    # starts Compose, runs tagged checks
 ./scripts/test.ps1 -Chaos          # chaos-tagged suite
-./scripts/test.ps1 -Bench          # benchmark placeholder
+./scripts/test.ps1 -Bench          # bench-tagged harness checks
 ```
 
 Bash equivalents are `./scripts/test.sh --unit`, `--integration`, `--chaos`,
@@ -133,6 +134,13 @@ Run only the Compose checks with
 ```powershell
 docker run --rm -v "${PWD}:/app" -w /app golang:1.22 `
   go test -race -tags=chaos -count=1 ./tests/chaos/...
+```
+
+### Bench harness
+
+```powershell
+docker run --rm -v "${PWD}:/app" -w /app golang:1.22 `
+  go test -race -tags=bench -count=1 ./tests/bench/...
 ```
 
 The chaos suite is in-process, deterministic, and does not need Compose. It
@@ -172,6 +180,7 @@ sleeps. Covered scenarios:
 | Detector hysteresis | `tests/unit/cluster` (fake clock) | — | partition |
 | Repair and rebalance | `internal/cluster/repairer_test.go` | `persistence_test.go` | restart/partition |
 | Concurrent clients | `tests/unit/cluster` queue races | `concurrent_test.go` (50 pairs) | — |
+| Benchmark harness | `internal/bench` | — | `tests/bench` (tag `bench`) |
 
 ## White-box exceptions
 
