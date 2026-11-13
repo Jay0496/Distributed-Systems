@@ -43,6 +43,12 @@ func TestAuthEndToEnd(t *testing.T) {
 	if _, err := rawClient.Get(ctx, &pb.GetRequest{Key: "missing"}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("missing token Get = %v, want Unauthenticated", err)
 	}
+	if _, err := rawClient.ForceSnapshot(ctx, &pb.ForceSnapshotRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("missing token ForceSnapshot = %v, want Unauthenticated", err)
+	}
+	if _, err := rawClient.CheckpointStore(ctx, &pb.CheckpointRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("missing token CheckpointStore = %v, want Unauthenticated", err)
+	}
 
 	wrong, err := c.DialRaw(ctx, c.Nodes[0].ID, "wrong-token")
 	if err != nil {
@@ -51,6 +57,15 @@ func TestAuthEndToEnd(t *testing.T) {
 	defer func() { _ = wrong.Close() }()
 	if _, err := pb.NewStorageServiceClient(wrong).Get(ctx, &pb.GetRequest{Key: "missing"}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("wrong token Get = %v, want Unauthenticated", err)
+	}
+
+	// Benchmark admin RPCs are not exempt: the harness's authenticated client
+	// must succeed on both, and they stay local to the addressed node.
+	if _, err := c.Nodes[0].Client.ForceSnapshot(ctx, &pb.ForceSnapshotRequest{}); err != nil {
+		t.Fatalf("authenticated ForceSnapshot: %v", err)
+	}
+	if _, err := c.Nodes[0].Client.CheckpointStore(ctx, &pb.CheckpointRequest{}); err != nil {
+		t.Fatalf("authenticated CheckpointStore: %v", err)
 	}
 
 	// The harness's ordinary clients include the bearer token. A write sent to

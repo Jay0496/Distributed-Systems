@@ -323,6 +323,9 @@ func TestServerStatsAndHealth(t *testing.T) {
 				if stats.GetFragments() == 0 {
 					t.Fatal("stats reported no fragments after two writes")
 				}
+				if stats.GetFragmentBytes() == 0 {
+					t.Fatal("stats reported no fragment payload bytes after two writes")
+				}
 				if stats.GetUptimeSeconds() < 0 {
 					t.Fatalf("uptime = %d", stats.GetUptimeSeconds())
 				}
@@ -420,8 +423,57 @@ func TestServerStatsAndHealth(t *testing.T) {
 	})
 }
 
-func TestCheckAuth(t *testing.T) {
-	open := &Server{cfg: config.Config{}}
+// TestServerSnapshotAndCheckpoint covers the additive benchmark RPCs on both a
+// leader and a follower. ForceSnapshot is deliberately local, so a follower must
+// succeed without forwarding, and CheckpointStore must report the post-checkpoint
+// database size.
+func TestServerSnapshotAndCheckpoint(t *testing.T) {
+	c := newTestCluster(t, 5)
+	leader := c.waitLeader(t)
+	follower := c.waitFollower(t)
+
+	ctx, cancel := ctxWithTimeout(t, 15*time.Second)
+	defer cancel()
+	resp, err := leader.client.Put(ctx, &pb.PutRequest{Key: "snapshot-key", Value: []byte("snapshot-value"), Mode: "rs32"})
+	if err != nil || !resp.GetSuccess() {
+		t.Fatalf("Put: resp=%+v err=%v", resp, err)
+	}
+	waitForMetaVersion(t, c, "snapshot-key", 1)
+
+	for _, node := range []*testNode{leader, follower} {
+		t.Run("force snapshot on "+node.id, func(t *testing.T) {
+			callCtx, cancel := ctxWithTimeout(t, 15*time.Second)
+			defer cancel()
+			out, err := node.client.ForceSnapshot(callCtx, &pb.ForceSnapshotRequest{})
+			if err != nil {
+				t.Fatalf("ForceSnapshot: %v", err)
+			}
+			if !out.GetSuccess() {
+				t.Fatalf("ForceSnapshot rejected: %s", out.GetMessage())
+			}
+			if out.GetLastIndex() == 0 {
+				t.Fatalf("ForceSnapshot last_index = 0")
+			}
+		})
+
+		t.Run("checkpoint store on "+node.id, func(t *testing.T) {
+			callCtx, cancel := ctxWithTimeout(t, 15*time.Second)
+			defer cancel()
+			out, err := node.client.CheckpointStore(callCtx, &pb.CheckpointRequest{})
+			if err != nil {
+				t.Fatalf("CheckpointStore: %v", err)
+			}
+			if !out.GetSuccess() {
+				t.Fatalf("CheckpointStore rejected: %s", out.GetMessage())
+			}
+			if out.GetBytesAfter() < 0 {
+				t.Fatalf("bytes_after = %d", out.GetBytesAfter())
+			}
+		})
+	}
+}
+
+func TestCheckAuth(t *testing.T) {	open := &Server{cfg: config.Config{}}
 	if err := open.CheckAuth(); err != nil {
 		t.Fatalf("auth-disabled server CheckAuth = %v", err)
 	}

@@ -165,6 +165,7 @@ func (s *Server) Stats(ctx context.Context, _ *pb.StatsRequest) (*pb.StatsRespon
 		Stripes:          nonNegative(stats.StripeCount),
 		Fragments:        nonNegative(stats.FragmentCount),
 		StorageBytes:     nonNegative(stats.Bytes),
+		FragmentBytes:    nonNegative(stats.FragmentBytes),
 		RepairQueueDepth: uint64(queue.Depth),
 		RepairsCompleted: queue.Completed,
 		RepairsFailed:    queue.Failed,
@@ -179,6 +180,71 @@ func (s *Server) localQueueStats() cluster.QueueStats {
 		return provider.Stats()
 	}
 	return cluster.QueueStats{}
+}
+
+// ForceSnapshot compacts this node's Raft state into a new snapshot. It is a
+// local, additive benchmark helper: every node snapshots its own state so the
+// harness can measure storage after compaction. It deliberately never forwards,
+// so a benchmark can iterate all five nodes without adding load to the leader.
+func (s *Server) ForceSnapshot(ctx context.Context, _ *pb.ForceSnapshotRequest) (*pb.ForceSnapshotResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.Error(codes.Canceled, err.Error())
+	}
+	if s.node == nil || s.node.Raft == nil {
+		return nil, status.Error(codes.Internal, "raft node is not configured")
+	}
+
+	timeout := s.cfg.WriteTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	future := s.node.Raft.Snapshot()
+	done := make(chan error, 1)
+	go func() { done <- future.Error() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "force raft snapshot: %v", err)
+		}
+		lastIndex := s.node.Raft.LastIndex()
+		return &pb.ForceSnapshotResponse{
+			Success:   true,
+			Message:   fmt.Sprintf("snapshot complete at last index %d", lastIndex),
+			LastIndex: lastIndex,
+		}, nil
+	case <-waitCtx.Done():
+		return nil, status.Errorf(codes.DeadlineExceeded, "force raft snapshot timed out: %v", waitCtx.Err())
+	}
+}
+
+// CheckpointStore truncates this node's SQLite write-ahead log and reports the
+// database size afterwards. It is local and additive; stores that do not
+// implement Checkpoint are reported as unsupported rather than silently
+// returning a misleading size.
+func (s *Server) CheckpointStore(ctx context.Context, _ *pb.CheckpointRequest) (*pb.CheckpointResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.Error(codes.Canceled, err.Error())
+	}
+	checkpointer, ok := s.store.(interface{ Checkpoint() error })
+	if !ok {
+		return nil, status.Error(codes.FailedPrecondition, "store does not support checkpointing")
+	}
+	if err := checkpointer.Checkpoint(); err != nil {
+		return nil, status.Errorf(codes.Internal, "checkpoint store: %v", err)
+	}
+	stats, err := s.store.Stats()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read stats after checkpoint: %v", err)
+	}
+	return &pb.CheckpointResponse{
+		Success:    true,
+		Message:    "sqlite write-ahead log checkpointed",
+		BytesAfter: stats.Bytes,
+	}, nil
 }
 
 // ClusterHealth reports the leader, global mode, and an on-demand probe of
