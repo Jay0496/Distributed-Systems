@@ -194,7 +194,11 @@ function Invoke-BenchWithCpu {
     $samples = @{}
     Add-CpuSnapshot -Samples $samples
     Write-Log ("bench scenario {0} (run {1})" -f $Scenario, $RunID)
-    $job = Start-Job -ScriptBlock { param($argsToRun) & docker @argsToRun } -ArgumentList (,$composeArgs)
+    $job = Start-Job -ScriptBlock {
+        param($argsToRun, $workdir)
+        Set-Location $workdir
+        & docker @argsToRun 2>&1
+    } -ArgumentList (,$composeArgs), $script:RepoRoot
     try {
         while ($job.State -eq 'Running') {
             Start-Sleep -Seconds 2
@@ -280,6 +284,9 @@ function Wait-HealthyAgain {
 $failures = [System.Collections.Generic.List[string]]::new()
 
 try {
+    # The tools profile is not started by `up`, so build its image explicitly;
+    # this keeps the bench binary in step with the checked-out source.
+    Invoke-Compose -Arguments @('build', 'bench') | Out-Null
     Ensure-Cluster
 
     if (-not $SkipLoad) {
@@ -320,7 +327,7 @@ try {
         foreach ($run in 1..$Runs) {
             Invoke-BenchDirect -Arguments @(
                 'recovery', '--seed-only', '--seed-keys', "$Values",
-                '--value-size', "$ValueSize", '--key-prefix', "recovery-run${run}"
+                '--value-size', "$ValueSize", '--key-prefix', "recovery-${runStamp}-run${run}"
             )
 
             $scenarios = @(

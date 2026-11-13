@@ -244,10 +244,12 @@ wait_healthy_again() {
     done
 }
 
+# The tools profile is not started by `up`, so build its image explicitly; this
+# keeps the bench binary in step with the checked-out source.
+compose build bench
 ensure_cluster
 
-if [[ "$skip_load" -eq 0 ]]; then
-    for run in $(seq 1 "$runs"); do
+if [[ "$skip_load" -eq 0 ]]; then    for run in $(seq 1 "$runs"); do
         for bench_mode in "${modes[@]}"; do
             run_bench_with_cpu "${run_stamp}-load-${bench_mode}-run${run}" "load-${bench_mode}" \
                 run --mode "$bench_mode" --concurrency "$concurrency" --duration "$duration" \
@@ -270,7 +272,7 @@ if [[ "$skip_recovery" -eq 0 ]]; then
     ensure_cluster
     for run in $(seq 1 "$runs"); do
         run_bench_direct recovery --seed-only --seed-keys "$values" \
-            --value-size "$value_size" --key-prefix "recovery-run${run}"
+            --value-size "$value_size" --key-prefix "recovery-${run_stamp}-run${run}"
 
         for scenario in one-node two-node; do
             if [[ "$scenario" == "one-node" ]]; then
