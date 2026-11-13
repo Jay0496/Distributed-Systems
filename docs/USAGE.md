@@ -79,6 +79,16 @@ Server-side tuning variables (`MAX_VALUE_SIZE`, `READ_TIMEOUT`,
 
 ## Commands
 
+### `version`
+
+```text
+gateway version
+gateway --version
+```
+
+Prints the release version stamped into the binary. `help` and `version` do not
+read `GATEWAY_NODES`, so they work before a cluster is running.
+
 ### `put`
 
 ```text

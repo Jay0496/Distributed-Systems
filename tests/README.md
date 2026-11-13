@@ -15,7 +15,7 @@ local check suite in Docker.
 tests/
   README.md
   support/      shared doubles and harnesses
-    store.go            in-memory storage.Store
+    store.go            in-memory storage.Store (`MemoryStore`)
     cluster.go          five-node in-process deployment
     cluster_helpers.go  leader/Get/Apply helpers
     listener.go         controllable bufconn lifecycle
@@ -25,12 +25,14 @@ tests/
     fixtures.go         deterministic seeds, keys, and values
     doc.go
   unit/         black-box unit tests, one directory per package under test
-    cluster/ consensus/ config/ gateway/ proto/ redundancy/ rpc/ server/ storage/
+    cluster/ consensus/ config/ gateway/ logging/ proto/ redundancy/ rpc/
+    server/ storage/
   integration/  in-process multi-node suites plus Compose-backed checks
     cluster_test.go     Compose cluster (build tag `integration`)
     write_path_test.go  read_path_test.go  admin_test.go  metadata_test.go
     gateway_test.go     auth_test.go        fragments_test.go
     persistence_test.go concurrent_test.go
+    shutdown_test.go    graceful shutdown, SQLite and Raft lock release
   chaos/        destructive failure, partition, and restart scenarios (tag `chaos`)
     failure_test.go     partition_test.go   restart_test.go   helpers_test.go
   bench/        bench-tagged harness checks (tag `bench`)
@@ -101,6 +103,7 @@ The script runner wraps cluster lifecycle and auth:
 ./scripts/check.ps1                # local build/vet/test/format checks
 ./scripts/check.ps1 -SkipChaos     # faster local check
 ./scripts/test.ps1                 # fast suite
+./scripts/test.ps1 -All            # full unit, integration, chaos, bench matrix
 ./scripts/test.ps1 -Integration    # starts Compose, runs tagged checks
 ./scripts/test.ps1 -Chaos          # chaos-tagged suite
 ./scripts/test.ps1 -Bench          # bench-tagged harness checks
@@ -169,6 +172,11 @@ sleeps. Covered scenarios:
 | Placement determinism | `tests/unit/redundancy` | write path | — |
 | Metadata commands, idempotency | `tests/unit/consensus`, `internal/consensus/fsm_test.go` | `metadata_test.go` | — |
 | Metadata-only snapshot restore | `internal/consensus/snapshot_test.go` | `persistence_test.go` | `TestMetadataOnlySnapshotRestoreRefillsFragments` |
+| Snapshot v1/v2 upgrade guard | `internal/consensus/snapshot_test.go` | — | — |
+| Liveness, readiness, heartbeat | `internal/server/health_test.go` | Compose health checks | — |
+| Request-ID propagation | `tests/unit/rpc`, `internal/server/health_test.go` | — | — |
+| Structured logging | `tests/unit/logging` | — | — |
+| Graceful shutdown and lock release | — | `shutdown_test.go` | Compose stop/start |
 | Snapshot restore plus fragment repair | — | `persistence_test.go` | `restart_test.go` |
 | Orphan grace period and in-flight writes | `tests/unit/cluster` | — | `TestOrphanSweepRespectsGracePeriod` |
 | Fragment transport | — | `fragments_test.go` | — |
@@ -196,6 +204,7 @@ exception must be added to this table with the reason.
 | `internal/server/fragment_push_test.go` | concurrent upload and local-owner fast path |
 | `internal/server/fragments_test.go` | streaming upload state machine and staging internals |
 | `internal/server/admin_test.go` | config/delete/stats/health handler seams and `newTestCluster` |
+| `internal/server/health_test.go` | `newTestCluster` readiness/request-ID hooks |
 | `internal/server/auth_test.go` | `dialFuncFor`, `newTestStore`, and fragment fetch/push internals |
 | `internal/server/repair_test.go` | repair handler queue seam |
 | `internal/server/forward_test.go` | loop-guard and forwarding internals |

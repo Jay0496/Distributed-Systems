@@ -30,6 +30,7 @@ and `AUTH_TOKEN`:
 
 ```powershell
 ./scripts/test.ps1                 # fast suite
+./scripts/test.ps1 -All            # full unit, integration, chaos, bench matrix
 ./scripts/test.ps1 -Integration    # starts Compose when needed
 ./scripts/test.ps1 -Chaos          # chaos suite
 ./scripts/test.ps1 -Bench          # bench-tagged harness checks
@@ -38,6 +39,7 @@ and `AUTH_TOKEN`:
 
 ```bash
 ./scripts/test.sh                  # fast suite
+./scripts/test.sh --all            # full unit, integration, chaos, bench matrix
 ./scripts/test.sh --integration
 ./scripts/test.sh --chaos
 ./scripts/test.sh --bench

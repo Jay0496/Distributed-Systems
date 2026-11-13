@@ -276,3 +276,73 @@ During the demo:
 
 The demo is safe to rerun: keys are overwritten with a new version and the
 script tolerates an existing cluster.
+
+## Clean-machine checklist
+
+Use this checklist for the final rehearsal from a fresh clone. It requires only
+Docker and Compose; no host Go installation or GitHub Actions access.
+
+1. Prerequisites:
+   - Docker Engine or Docker Desktop with the Compose v2 plugin;
+   - ports 50051-50055 and 60051-60055 free;
+   - no stale `distributed-systems` volumes from an older checkout.
+2. Clone the repository into a new directory and enter it:
+
+   ```powershell
+   git clone <repository-url> distributed-systems-release
+   cd distributed-systems-release
+   ```
+
+3. Start the five-node cluster and wait for readiness:
+
+   ```powershell
+   ./scripts/up.ps1
+   ```
+
+4. Run the full scripted demo, including the two-node failure and repair
+   section:
+
+   ```powershell
+   ./scripts/demo.ps1
+   ```
+
+5. Verify the storage numbers: RS stores about 1.67x the logical payload and
+   replication stores 5.00x. The demo prints both ratios.
+6. Stop two nodes and confirm reads and writes still work, restart them, and
+   confirm automatic repair:
+
+   ```powershell
+   docker compose stop node4 node5
+   docker compose run --rm gateway get demo-key
+   docker compose start node4 node5
+   docker compose run --rm gateway status
+   ```
+
+7. Run the release checks and suites:
+
+   ```powershell
+   ./scripts/check.ps1
+   ./scripts/check-docs.ps1
+   ./scripts/test.ps1 -All
+   ```
+
+8. Run the benchmark matrix and keep the generated CSV report:
+
+   ```powershell
+   ./scripts/bench.ps1 -Runs 3 -Duration 60s
+   ```
+
+9. Reset to a clean state and confirm a fresh start:
+
+   ```powershell
+   ./scripts/reset.ps1
+   ./scripts/up.ps1
+   ```
+
+10. Confirm logs are structured when `LOG_FORMAT=json` and that no value or
+    token appears in a log line, then tear down:
+
+    ```powershell
+    docker compose down
+    ```
+

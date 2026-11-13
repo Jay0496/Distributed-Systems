@@ -42,7 +42,7 @@ few seconds are expected and documented in the logs.
 | `down.ps1` / `down.sh` | Stop containers; preserve volumes by default | `-Volumes` / `--volumes` |
 | `reset.ps1` / `reset.sh` | Destructive reset of containers, network, and volumes | `-Build` / `--build` |
 | `demo.ps1` / `demo.sh` | End-to-end RS/replication, failure, repair, delete | `-Mode`, `-SkipFailure`, `-Keep`, `-ValueSize` |
-| `test.ps1` / `test.sh` | Unit, integration, chaos, bench suites | `-Integration`, `-Chaos`, `-Bench`, `-Keep` |
+| `test.ps1` / `test.sh` | Unit, integration, chaos, bench suites | `-All`, `-Integration`, `-Chaos`, `-Bench`, `-Keep` |
 | `bench.ps1` / `bench.sh` | Load, storage, recovery, and CPU benchmarks | `-Runs`, `-Duration`, `-Mode`, `-Skip*` |
 
 Every script supports `-Help` / `--help`. `down` is non-destructive; only
@@ -90,6 +90,39 @@ docker compose exec node1 sqlite3 /data/node.db "select count(*) from fragments;
 
 The runtime image includes the `sqlite` CLI specifically so operators can inspect
 `/data/node.db` without installing tools on the host.
+
+Set `LOG_FORMAT=json` in containers to emit one JSON object per line with
+`service`, `node_id`, method/request fields, `request_id`, and `error` where
+applicable. The default `text` format is for local runs. Logs never include
+payload bytes or the bearer token.
+
+### Liveness, readiness, and shutdown
+
+The standard gRPC health service exposes two signals:
+
+- the empty service name (`""`) is **liveness**: `SERVING` while the process is
+  running and SQLite answers a ping;
+- `storage.StorageService` is **readiness**: `SERVING` only when the node is
+  live, the repairer is initialized, and Raft knows a leader. Followers with a
+  leader are ready because they forward client traffic.
+
+Both start `NOT_SERVING`. They flip to `SERVING` after startup and back to
+`NOT_SERVING` as the first shutdown step. The wire-compatible `Heartbeat` RPC
+reports the same readiness value and is retained for older clients.
+
+Compose has one health check per node and it probes the empty service name, so
+it answers the restart question ("is the process alive and is SQLite open?").
+Readiness for user traffic is reported separately by `gateway status`, the
+cluster health RPC, and the detector's `storage.StorageService` probe. Keeping
+one check avoids a node being killed by Compose merely because it is waiting
+for a leader election.
+
+Shutdown order is: mark not ready, drain gRPC up to `SHUTDOWN_TIMEOUT` (default
+`30s`) then force-stop, cancel the process context, stop detector/repair
+workers, close cached peer connections, close Raft, close SQLite, and close the
+Raft transport. `docker compose stop` sends SIGTERM and waits up to the
+Compose `stop_grace_period`; a restart can open `node.db` and `raft.db`
+immediately. Repeated signals are safe because each closer is idempotent.
 
 ### Reset and volume migration
 
