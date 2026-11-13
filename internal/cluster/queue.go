@@ -89,6 +89,9 @@ type QueueOptions struct {
 	BackoffMax time.Duration
 	// Jitter adjusts a computed delay. Nil uses +/-20% jitter.
 	Jitter func(time.Duration) time.Duration
+	// RootContext is the process-lifetime context that bounds each handler
+	// invocation. Nil uses context.Background().
+	RootContext context.Context
 }
 
 type taskKey struct {
@@ -353,7 +356,11 @@ func (q *Queue) worker() {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), q.opts.Timeout)
+		root := q.opts.RootContext
+		if root == nil {
+			root = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(root, q.opts.Timeout)
 		var err error
 		if q.handler != nil {
 			err = q.handler(ctx, entry.task)

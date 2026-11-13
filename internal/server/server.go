@@ -120,6 +120,7 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 		Capacity:    repairQueueCapacity,
 		Timeout:     cfg.WriteTimeout + cfg.ReadTimeout,
 		MaxAttempts: cfg.RepairMaxAttempts,
+		RootContext: rootCtx,
 	}, srv.repairer.Process)
 	if queue, ok := srv.repairQueue.(*cluster.Queue); ok {
 		srv.repairer.SetQueue(queue)

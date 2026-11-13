@@ -99,8 +99,12 @@ func (s *Server) garbageCollectOldStripe(currentStripeID string, old *storage.Ke
 		return
 	}
 	oldMeta := *old
+	root := s.rootCtx
+	if root == nil {
+		root = context.Background()
+	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), gcTimeout)
+		ctx, cancel := context.WithTimeout(root, gcTimeout)
 		defer cancel()
 		s.deleteStripeFragments(ctx, oldMeta.StripeID, oldMeta.Placement)
 		log.Printf("write: garbage-collected stripe=%s positions=%d", oldMeta.StripeID, len(oldMeta.Placement))

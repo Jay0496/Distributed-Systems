@@ -67,6 +67,28 @@ func (s *Server) applyRaft(data []byte, timeout time.Duration) (interface{}, err
 	}
 }
 
+// applyContext applies one command with a timeout capped by the caller's
+// deadline. It returns DeadlineExceeded rather than blocking past a canceled
+// request.
+func (s *Server) applyContext(ctx context.Context, data []byte) (interface{}, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	timeout := s.cfg.WriteTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			timeout = remaining
+		}
+	}
+	if timeout <= 0 {
+		return nil, context.DeadlineExceeded
+	}
+	return s.apply(data, timeout)
+}
+
 // marshalCommand encodes a command for the Raft log.
 func marshalCommand(cmd consensus.Command) ([]byte, error) {
 	data, err := json.Marshal(cmd)
@@ -88,7 +110,7 @@ func (s *Server) readMeta(ctx context.Context, key string) (storage.KeyMeta, boo
 		return storage.KeyMeta{}, false, err
 	}
 
-	response, err := s.apply(data, s.cfg.WriteTimeout)
+	response, err := s.applyContext(ctx, data)
 	if err != nil {
 		return storage.KeyMeta{}, false, err
 	}
@@ -224,7 +246,7 @@ const maxWriteAttempts = 2
 // commitMetadata marshals a metadata-only put_meta command and applies it
 // through Raft. The returned result may carry an application rejection; an
 // error means the commit outcome is ambiguous and fragments must be retained.
-func (s *Server) commitMetadata(intent *writeIntent, placements []storage.ShardPlacement, degraded bool) (*consensus.Result, error) {
+func (s *Server) commitMetadata(ctx context.Context, intent *writeIntent, placements []storage.ShardPlacement, degraded bool) (*consensus.Result, error) {
 	meta := storage.KeyMeta{
 		Key:       intent.key,
 		StripeID:  intent.stripeID,
@@ -240,7 +262,7 @@ func (s *Server) commitMetadata(intent *writeIntent, placements []storage.ShardP
 		return nil, err
 	}
 
-	response, err := s.apply(data, s.cfg.WriteTimeout)
+	response, err := s.applyContext(ctx, data)
 	if err != nil {
 		// Ambiguous: the entry may have committed. Never delete the new stripe
 		// here; the task 09 orphan sweep handles fragments that no metadata
@@ -275,7 +297,7 @@ func (s *Server) write(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse
 
 		stored := s.pushShards(ctx, intent.stripeID, shards, placements)
 		if len(stored) < writeQuorum {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), gcTimeout)
+			cleanupCtx, cancel := context.WithTimeout(ctx, gcTimeout)
 			s.deleteStripeFragments(cleanupCtx, intent.stripeID, stored)
 			cancel()
 			return writeFailed("only %d of %d shards were stored; quorum is %d",
@@ -283,7 +305,7 @@ func (s *Server) write(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse
 		}
 
 		degraded := len(stored) < redundancy.TotalShards
-		result, err := s.commitMetadata(intent, placements, degraded)
+		result, err := s.commitMetadata(ctx, intent, placements, degraded)
 		if err != nil {
 			return writeFailed("metadata commit outcome is unknown: %v", err), nil
 		}
@@ -296,7 +318,7 @@ func (s *Server) write(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse
 			if definite {
 				// Remove the fragments this attempt stored so a failed write
 				// leaves no stripe behind.
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), gcTimeout)
+				cleanupCtx, cancel := context.WithTimeout(ctx, gcTimeout)
 				s.deleteStripeFragments(cleanupCtx, intent.stripeID, stored)
 				cancel()
 			}
