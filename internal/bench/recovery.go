@@ -40,20 +40,20 @@ type HealthSample struct {
 // RecoveryResult is one recovery scenario, with timestamps rather than only
 // aggregate durations so a reader can check the clock arithmetic.
 type RecoveryResult struct {
-	Scenario            string        `json:"scenario"`
-	StartTime           time.Time     `json:"start_time"`
-	DegradedAt          time.Time     `json:"degraded_at,omitempty"`
-	RestartTime         time.Time     `json:"restart_time,omitempty"`
-	RepairedAt          time.Time     `json:"repaired_at,omitempty"`
-	TimeToDegraded      time.Duration `json:"-"`
-	RepairDuration      time.Duration `json:"-"`
-	TotalDuration       time.Duration `json:"-"`
-	HealthyNodes        uint32        `json:"healthy_nodes"`
-	TotalNodes          uint32        `json:"total_nodes"`
-	DegradedStripes     uint64        `json:"degraded_stripes"`
-	RepairQueueDepth    uint64        `json:"repair_queue_depth"`
-	Observed            []HealthSample `json:"observed"`
-	Error               string        `json:"error,omitempty"`
+	Scenario         string         `json:"scenario"`
+	StartTime        time.Time      `json:"start_time"`
+	DegradedAt       time.Time      `json:"degraded_at,omitempty"`
+	RestartTime      time.Time      `json:"restart_time,omitempty"`
+	RepairedAt       time.Time      `json:"repaired_at,omitempty"`
+	TimeToDegraded   time.Duration  `json:"-"`
+	RepairDuration   time.Duration  `json:"-"`
+	TotalDuration    time.Duration  `json:"-"`
+	HealthyNodes     uint32         `json:"healthy_nodes"`
+	TotalNodes       uint32         `json:"total_nodes"`
+	DegradedStripes  uint64         `json:"degraded_stripes"`
+	RepairQueueDepth uint64         `json:"repair_queue_depth"`
+	Observed         []HealthSample `json:"observed"`
+	Error            string         `json:"error,omitempty"`
 }
 
 // Normalize fills recovery defaults.
@@ -150,11 +150,11 @@ func PollRecovery(ctx context.Context, source HealthSource, opts RecoveryOptions
 		start = time.Now()
 	}
 	result := &RecoveryResult{
-		Scenario:     opts.Scenario,
-		StartTime:    start,
-		DegradedAt:   opts.DegradedTime,
-		RestartTime:  opts.RestartTime,
-		Observed:     make([]HealthSample, 0, 16),
+		Scenario:    opts.Scenario,
+		StartTime:   start,
+		DegradedAt:  opts.DegradedTime,
+		RestartTime: opts.RestartTime,
+		Observed:    make([]HealthSample, 0, 16),
 	}
 
 	deadline := time.Now().Add(opts.Timeout)

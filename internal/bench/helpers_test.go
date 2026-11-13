@@ -66,8 +66,13 @@ func (f *fakeAPI) Get(ctx context.Context, req *pb.GetRequest, _ ...grpc.CallOpt
 func (f *fakeAPI) Stats(context.Context, *pb.StatsRequest, ...grpc.CallOption) (*pb.StatsResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	resp := f.stats
-	return &resp, nil
+	return &pb.StatsResponse{
+		Keys:          f.stats.Keys,
+		Stripes:       f.stats.Stripes,
+		Fragments:     f.stats.Fragments,
+		FragmentBytes: f.stats.FragmentBytes,
+		StorageBytes:  f.stats.StorageBytes,
+	}, nil
 }
 
 func (f *fakeAPI) ForceSnapshot(context.Context, *pb.ForceSnapshotRequest, ...grpc.CallOption) (*pb.ForceSnapshotResponse, error) {

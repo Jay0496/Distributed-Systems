@@ -48,10 +48,10 @@ func TestLoadOptionsValidation(t *testing.T) {
 		t.Fatalf("valid options: %v", err)
 	}
 	cases := map[string]LoadOptions{
-		"zero duration":  {Mode: "rs32", Concurrency: 1, Duration: 0, ValueSize: 8, Keys: 1},
+		"zero duration":   {Mode: "rs32", Concurrency: 1, Duration: 0, ValueSize: 8, Keys: 1},
 		"bad concurrency": {Mode: "rs32", Concurrency: 0, Duration: time.Second, ValueSize: 8, Keys: 1},
-		"bad mode":       {Mode: "triple", Concurrency: 1, Duration: time.Second, ValueSize: 8, Keys: 1},
-		"bad read ratio": {Mode: "rs32", Concurrency: 1, Duration: time.Second, ValueSize: 8, Keys: 1, ReadRatio: 2},
+		"bad mode":        {Mode: "triple", Concurrency: 1, Duration: time.Second, ValueSize: 8, Keys: 1},
+		"bad read ratio":  {Mode: "rs32", Concurrency: 1, Duration: time.Second, ValueSize: 8, Keys: 1, ReadRatio: 2},
 	}
 	for name, opts := range cases {
 		if _, err := opts.Normalize(); err == nil {

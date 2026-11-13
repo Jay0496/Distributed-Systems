@@ -71,11 +71,11 @@ func Percentile(samples []time.Duration, p float64) time.Duration {
 
 // SampleSet is the raw input for one operation's summary.
 type SampleSet struct {
-	Latencies []time.Duration
-	Attempts  int64
-	Count     int64
-	Errors    int64
-	Bytes     int64
+	Latencies  []time.Duration
+	Attempts   int64
+	Count      int64
+	Errors     int64
+	Bytes      int64
 	ErrorKinds map[string]int64
 }
 

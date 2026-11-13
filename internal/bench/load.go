@@ -84,18 +84,18 @@ func (o LoadOptions) Normalize() (LoadOptions, error) {
 // workerResult accumulates one worker's samples. Workers own disjoint key
 // ranges, so no two workers write the same key unless hot keys were requested.
 type workerResult struct {
-	putSamples []time.Duration
-	getSamples []time.Duration
+	putSamples  []time.Duration
+	getSamples  []time.Duration
 	putAttempts int64
 	getAttempts int64
-	putCount   int64
-	getCount   int64
-	putBytes   int64
-	getBytes   int64
-	putErrors  map[string]int64
-	getErrors  map[string]int64
-	degraded   int64
-	retries    int64
+	putCount    int64
+	getCount    int64
+	putBytes    int64
+	getBytes    int64
+	putErrors   map[string]int64
+	getErrors   map[string]int64
+	degraded    int64
+	retries     int64
 }
 
 // LoadRunner executes the deterministic mixed workload.

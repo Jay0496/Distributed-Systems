@@ -16,9 +16,9 @@ import (
 
 // CPUStat is the average CPU usage of one node while a scenario ran.
 type CPUStat struct {
-	Node           string  `json:"node"`
-	AvgCPUPercent  float64 `json:"avg_cpu_percent"`
-	Samples        int     `json:"samples"`
+	Node          string  `json:"node"`
+	AvgCPUPercent float64 `json:"avg_cpu_percent"`
+	Samples       int     `json:"samples"`
 }
 
 // Meta describes one benchmark run's environment and flags.
