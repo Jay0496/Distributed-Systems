@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -57,8 +58,6 @@ func runLoad(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer closeNodes()
-	_ = output
-	_ = runID
 
 	runner, err := bench.NewLoadRunner(nodes, opts)
 	if err != nil {
@@ -74,21 +73,28 @@ func runLoad(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	printLoadSummary(stdout, result)
-	return 0
-}
-
-// printLoadSummary renders the console table before the CSV/JSON writers are
-// used. It keeps the load generator runnable without a result directory.
-func printLoadSummary(w io.Writer, result *bench.LoadResult) {
-	fmt.Fprintf(w, "mode=%s concurrency=%d duration=%s warmup=%s value_size=%d keys=%d read_ratio=%.2f nodes=%d\n",
-		result.Mode, result.Concurrency, result.Measured, result.Warmup, result.ValueSize, result.Keys, result.ReadRatio, result.Nodes)
-	fmt.Fprintln(w, "operation  count  errors  p50_ms  p95_ms  p99_ms  max_ms  ops_per_sec  bytes_per_sec")
-	for _, op := range []bench.OpStats{result.Put, result.Get} {
-		fmt.Fprintf(w, "%-10s %6d %7d %7s %7s %7s %7s %12.2f %14.2f\n",
-			op.Operation, op.Count, op.Errors,
-			bench.FormatDuration(op.P50), bench.FormatDuration(op.P95), bench.FormatDuration(op.P99), bench.FormatDuration(op.Max),
-			op.OpsPerSecond, op.BytesPerSecond)
+	artifacts := bench.RunArtifacts{
+		Meta: bench.NewMeta("", map[string]string{
+			"command":     "run",
+			"mode":        opts.Mode,
+			"concurrency": fmt.Sprint(opts.Concurrency),
+			"duration":    opts.Duration.String(),
+			"warmup":      opts.Warmup.String(),
+			"value_size":  fmt.Sprint(opts.ValueSize),
+			"keys":        fmt.Sprint(opts.Keys),
+			"read_ratio":  fmt.Sprint(opts.ReadRatio),
+			"hot_keys":    fmt.Sprint(opts.HotKeys),
+			"seed":        fmt.Sprint(opts.Seed),
+			"nodes":       strings.Join(nodes.OrderedNodes(), ","),
+		}),
+		Load: result,
 	}
-	fmt.Fprintf(w, "error_rate=%.3f%% degraded_writes=%d retries=%d\n", result.ErrorRate*100, result.Degraded, result.Retries)
+	dir := runDirectory(*output, *runID, artifacts.Meta.Timestamp)
+	if err := bench.WriteRun(dir, artifacts); err != nil {
+		fmt.Fprintf(stderr, "bench run: %v\n", err)
+		return 1
+	}
+	fmt.Fprint(stdout, bench.RenderSummary(artifacts))
+	fmt.Fprintf(stdout, "\nresults: %s\n", dir)
+	return 0
 }

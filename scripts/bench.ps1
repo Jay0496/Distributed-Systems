@@ -212,6 +212,7 @@ function Invoke-BenchWithCpu {
         Write-Host $text
         Add-CpuSnapshot -Samples $samples
         Write-CpuCsv -Directory $runDir -Samples $samples
+        Update-BenchSummary -RunID $RunID
     }
     finally {
         if ($job.State -eq 'Running') {
@@ -228,6 +229,15 @@ function Invoke-BenchDirect {
     $composeArgs += @('-v', "${hostOut}:/results", 'bench')
     $composeArgs += $Arguments
     Invoke-Compose -Arguments $composeArgs | Out-Host
+}
+
+# Update-BenchSummary regenerates summary.md after the script writes cpu.csv.
+function Update-BenchSummary {
+    param([string]$RunID)
+    $composeArgs = @('run', '--rm', '-T')
+    $composeArgs += Get-AuthContainerArgs
+    $composeArgs += @('-v', "${hostOut}:/results", 'bench', 'report', '--input', "/results/$RunID")
+    Invoke-Compose -Arguments $composeArgs | Out-Null
 }
 
 function Get-BenchStatus {

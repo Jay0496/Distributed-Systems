@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"distributed-kv-store/internal/bench"
@@ -39,8 +40,6 @@ func runStorage(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer closeNodes()
-	_ = output
-	_ = runID
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -50,17 +49,24 @@ func runStorage(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	printStorageSummary(stdout, *result)
-	return 0
-}
-
-// printStorageSummary renders payload and disk ratios separately so RS is never
-// described as a percentage of the original.
-func printStorageSummary(w io.Writer, result bench.StorageResult) {
-	fmt.Fprintf(w, "mode=%s keys=%d value_size=%d logical_bytes=%d fragment_bytes=%d disk_bytes=%d payload_ratio=%.3fx disk_ratio=%.3fx\n",
-		result.Mode, result.Keys, result.ValueSize, result.LogicalBytes, result.FragmentBytes, result.DiskBytes, result.PayloadRatio, result.DiskRatio)
-	for _, node := range result.Nodes {
-		fmt.Fprintf(w, "  %s keys=%d fragments=%d fragment_bytes=%d disk_bytes=%d\n",
-			node.NodeID, node.Keys, node.Fragments, node.FragmentBytes, node.DiskBytes)
+	artifacts := bench.RunArtifacts{
+		Meta: bench.NewMeta("", map[string]string{
+			"command":    "storage",
+			"mode":       opts.Mode,
+			"values":     fmt.Sprint(opts.Values),
+			"value_size": fmt.Sprint(opts.ValueSize),
+			"key_prefix": opts.Prefix,
+			"seed":       fmt.Sprint(opts.Seed),
+			"nodes":      strings.Join(nodes.OrderedNodes(), ","),
+		}),
+		Storage: []bench.StorageResult{*result},
 	}
+	dir := runDirectory(*output, *runID, artifacts.Meta.Timestamp)
+	if err := bench.WriteRun(dir, artifacts); err != nil {
+		fmt.Fprintf(stderr, "bench storage: %v\n", err)
+		return 1
+	}
+	fmt.Fprint(stdout, bench.RenderSummary(artifacts))
+	fmt.Fprintf(stdout, "\nresults: %s\n", dir)
+	return 0
 }

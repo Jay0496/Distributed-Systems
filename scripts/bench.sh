@@ -188,6 +188,7 @@ run_bench_with_cpu() {
     if [[ "$status" -ne 0 ]]; then
         die "bench scenario ${scenario} failed with exit code ${status}"
     fi
+    update_bench_summary "$run_id"
 }
 
 run_bench_direct() {
@@ -197,6 +198,16 @@ run_bench_direct() {
     fi
     args+=(-v "${host_out}:/results" bench "$@")
     compose "${args[@]}"
+}
+
+update_bench_summary() {
+    local run_id="$1"
+    local -a args=(run --rm -T)
+    if [[ -n "$AUTH_TOKEN_VALUE" ]]; then
+        args+=(-e AUTH_TOKEN)
+    fi
+    args+=(-v "${host_out}:/results" bench report --input "/results/${run_id}")
+    docker compose "${args[@]}" >/dev/null
 }
 
 bench_status() {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -70,8 +71,6 @@ func runRecovery(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer closeNodes()
-	_ = output
-	_ = runID
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -95,35 +94,36 @@ func runRecovery(args []string, stdout, stderr io.Writer) int {
 	}
 
 	result, err := bench.PollRecovery(ctx, bench.NodesHealthSource(nodes), opts)
-	if result != nil {
-		printRecoverySummary(stdout, *result)
-	}
 	if err != nil {
+		if result != nil {
+			artifacts := recoveryArtifacts(result, nodes)
+			dir := runDirectory(*output, *runID, artifacts.Meta.Timestamp)
+			if writeErr := bench.WriteRun(dir, artifacts); writeErr != nil {
+				fmt.Fprintf(stderr, "bench recovery: write results: %v\n", writeErr)
+			}
+		}
 		fmt.Fprintf(stderr, "bench recovery: %v\n", err)
 		return 1
 	}
+
+	artifacts := recoveryArtifacts(result, nodes)
+	dir := runDirectory(*output, *runID, artifacts.Meta.Timestamp)
+	if err := bench.WriteRun(dir, artifacts); err != nil {
+		fmt.Fprintf(stderr, "bench recovery: %v\n", err)
+		return 1
+	}
+	fmt.Fprint(stdout, bench.RenderSummary(artifacts))
+	fmt.Fprintf(stdout, "\nresults: %s\n", dir)
 	return 0
 }
 
-// printRecoverySummary reports the timestamps and clock arithmetic used for the
-// recovery claim.
-func printRecoverySummary(w io.Writer, result bench.RecoveryResult) {
-	fmt.Fprintf(w, "scenario=%s start=%s degraded=%s restart=%s repaired=%s time_to_degraded=%.3fs repair=%.3fs total=%.3fs healthy=%d/%d\n",
-		result.Scenario,
-		formatBenchTime(result.StartTime),
-		formatBenchTime(result.DegradedAt),
-		formatBenchTime(result.RestartTime),
-		formatBenchTime(result.RepairedAt),
-		result.TimeToDegraded.Seconds(),
-		result.RepairDuration.Seconds(),
-		result.TotalDuration.Seconds(),
-		result.HealthyNodes,
-		result.TotalNodes)
-}
-
-func formatBenchTime(value time.Time) string {
-	if value.IsZero() {
-		return "-"
+func recoveryArtifacts(result *bench.RecoveryResult, nodes bench.Nodes) bench.RunArtifacts {
+	return bench.RunArtifacts{
+		Meta: bench.NewMeta("", map[string]string{
+			"command":  "recovery",
+			"scenario": result.Scenario,
+			"nodes":    strings.Join(nodes.OrderedNodes(), ","),
+		}),
+		Recovery: []bench.RecoveryResult{*result},
 	}
-	return value.UTC().Format(time.RFC3339)
 }
