@@ -7,14 +7,11 @@ import (
 
 // schemaStatements is the additive SQLite schema. Every statement is safe to
 // run against an existing database: tables use IF NOT EXISTS, indexes use
-// IF NOT EXISTS, and singleton rows use INSERT OR IGNORE. The legacy `store`
-// table keeps its original name so an existing /data/node.db upgrades in place.
+// IF NOT EXISTS, and singleton rows use INSERT OR IGNORE.
 var schemaStatements = []string{
-	`CREATE TABLE IF NOT EXISTS store (
-		key TEXT PRIMARY KEY,
-		value BLOB NOT NULL,
-		is_parity INTEGER NOT NULL DEFAULT 0 CHECK (is_parity IN (0,1)),
-		updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+	`CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS stripes (
@@ -75,7 +72,13 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_placements_node_id ON placements(node_id)`,
 }
 
-// migrate creates the schema idempotently and seeds the singleton rows.
+// legacyStoreTable is the transitional full-value table created by earlier
+// releases. It is dropped only when empty; otherwise startup fails so values
+// are never discarded silently.
+const legacyStoreTable = "store"
+
+// migrate creates the schema idempotently, seeds the singleton rows, and runs
+// the guarded removal of the legacy full-value table.
 func migrate(db *sql.DB) error {
 	for _, statement := range schemaStatements {
 		if _, err := db.Exec(statement); err != nil {
@@ -89,5 +92,55 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("seed raft_state: %w", err)
 	}
 
+	if err := dropEmptyLegacyStore(db); err != nil {
+		return err
+	}
+
+	if _, err := db.Exec(
+		`INSERT OR IGNORE INTO schema_migrations (version) VALUES (3)`,
+	); err != nil {
+		return fmt.Errorf("record schema migration: %w", err)
+	}
+
 	return nil
+}
+
+// dropEmptyLegacyStore refuses to drop the legacy table while it holds rows.
+// The message tells the operator how to preserve the data first.
+func dropEmptyLegacyStore(db *sql.DB) error {
+	exists, err := tableExists(db, legacyStoreTable)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+
+	var count int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM store`).Scan(&count); err != nil {
+		return fmt.Errorf("count legacy store rows: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf(
+			"legacy table %q still holds %d value(s) that cannot be converted to stripes; "+
+				"export them with the last release that supports the legacy path, rewrite each key through the current CLI, "+
+				"then delete the rows or start with a fresh data directory",
+			legacyStoreTable, count)
+	}
+
+	if _, err := db.Exec(`DROP TABLE store`); err != nil {
+		return fmt.Errorf("drop empty legacy table: %w", err)
+	}
+	return nil
+}
+
+func tableExists(db *sql.DB, name string) (bool, error) {
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("inspect SQLite schema: %w", err)
+	}
+	return count > 0, nil
 }

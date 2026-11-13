@@ -164,17 +164,12 @@ func TestMetadataCommandHasNoPayload(t *testing.T) {
 	}
 }
 
-func TestCommandHasNoTopLevelValueField(t *testing.T) {
+func TestCommandHasNoPayloadField(t *testing.T) {
 	commandType := reflect.TypeOf(consensus.Command{})
-	if _, ok := commandType.FieldByName("Value"); ok {
-		t.Fatal("Command must not expose a top-level Value field")
-	}
-	if _, ok := commandType.FieldByName("Legacy"); !ok {
-		t.Fatal("Command must expose the transitional Legacy field")
-	}
-	legacyType := reflect.TypeOf(consensus.LegacyOp{})
-	if _, ok := legacyType.FieldByName("Value"); !ok {
-		t.Fatal("LegacyOp must carry the transitional payload")
+	for _, field := range []string{"Value", "Legacy"} {
+		if _, ok := commandType.FieldByName(field); ok {
+			t.Fatalf("Command must not expose a %s field", field)
+		}
 	}
 }
 

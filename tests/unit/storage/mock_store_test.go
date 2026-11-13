@@ -10,86 +10,76 @@ import (
 	"distributed-kv-store/tests/support"
 )
 
-func TestMockStorePutGet(t *testing.T) {
+func TestMockStoreFragmentRoundTrip(t *testing.T) {
 	store := support.NewMockStore()
 	t.Cleanup(func() { _ = store.Close() })
 
-	if err := store.Put("alpha", []byte("one"), false); err != nil {
-		t.Fatalf("Put failed: %v", err)
+	frag := storage.Fragment{
+		StripeID:   "stripe-1",
+		ShardIndex: 2,
+		Data:       []byte("one"),
+		Checksum:   digest([]byte("one")),
 	}
-	got, err := store.Get("alpha")
+	if err := store.PutFragment(frag); err != nil {
+		t.Fatalf("PutFragment failed: %v", err)
+	}
+	got, err := store.GetFragment("stripe-1", 2)
 	if err != nil {
-		t.Fatalf("Get failed: %v", err)
+		t.Fatalf("GetFragment failed: %v", err)
 	}
-	if string(got) != "one" {
-		t.Fatalf("expected %q, got %q", "one", got)
+	if string(got.Data) != "one" {
+		t.Fatalf("expected %q, got %q", "one", got.Data)
 	}
 }
 
-func TestMockStoreMissingKey(t *testing.T) {
+func TestMockStoreMissingFragment(t *testing.T) {
 	store := support.NewMockStore()
 	t.Cleanup(func() { _ = store.Close() })
 
-	if _, err := store.Get("missing"); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := store.GetFragment("missing", 0); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
 
-func TestMockStoreCopiesValues(t *testing.T) {
+func TestMockStoreCopiesFragments(t *testing.T) {
 	store := support.NewMockStore()
 	t.Cleanup(func() { _ = store.Close() })
 
 	input := []byte("original")
-	if err := store.Put("key", input, false); err != nil {
-		t.Fatalf("Put failed: %v", err)
+	if err := store.PutFragment(storage.Fragment{StripeID: "stripe", ShardIndex: 0, Data: input}); err != nil {
+		t.Fatalf("PutFragment failed: %v", err)
 	}
 
 	input[0] = 'X'
-	got, err := store.Get("key")
+	got, err := store.GetFragment("stripe", 0)
 	if err != nil {
-		t.Fatalf("Get failed: %v", err)
+		t.Fatalf("GetFragment failed: %v", err)
 	}
-	if string(got) != "original" {
-		t.Fatalf("store aliased caller memory: got %q", got)
+	if string(got.Data) != "original" {
+		t.Fatalf("store aliased caller memory: got %q", got.Data)
 	}
 
-	got[0] = 'Y'
-	again, _ := store.Get("key")
-	if string(again) != "original" {
-		t.Fatalf("store aliased returned memory: got %q", again)
+	got.Data[0] = 'Y'
+	again, _ := store.GetFragment("stripe", 0)
+	if string(again.Data) != "original" {
+		t.Fatalf("store aliased returned memory: got %q", again.Data)
 	}
 }
 
-func TestMockStoreSnapshotRestore(t *testing.T) {
+func TestMockStoreMetadata(t *testing.T) {
 	store := support.NewMockStore()
 	t.Cleanup(func() { _ = store.Close() })
 
-	if err := store.Put("a", []byte("1"), false); err != nil {
-		t.Fatalf("Put failed: %v", err)
+	meta := testMeta("alpha", "stripe-1", 1, []byte("value"), "rs32")
+	if _, err := store.ApplyPutMeta(1, meta); err != nil {
+		t.Fatalf("ApplyPutMeta failed: %v", err)
 	}
-	if err := store.Put("b", []byte("2"), true); err != nil {
-		t.Fatalf("Put failed: %v", err)
-	}
-
-	snapshot, err := store.Snapshot()
+	got, err := store.GetKey("alpha")
 	if err != nil {
-		t.Fatalf("Snapshot failed: %v", err)
+		t.Fatalf("GetKey failed: %v", err)
 	}
-
-	restored := support.NewMockStore()
-	t.Cleanup(func() { _ = restored.Close() })
-	if err := restored.Restore(snapshot); err != nil {
-		t.Fatalf("Restore failed: %v", err)
-	}
-
-	for key, want := range map[string]string{"a": "1", "b": "2"} {
-		got, err := restored.Get(key)
-		if err != nil {
-			t.Fatalf("Get(%q) failed: %v", key, err)
-		}
-		if string(got) != want {
-			t.Fatalf("Get(%q) = %q, want %q", key, got, want)
-		}
+	if got.StripeID != "stripe-1" || len(got.Placement) != 5 {
+		t.Fatalf("GetKey = %+v", got)
 	}
 }
 
@@ -102,13 +92,13 @@ func TestMockStoreConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			key := fmt.Sprintf("key-%d", i)
-			if err := store.Put(key, []byte("value"), false); err != nil {
-				t.Errorf("Put(%q) failed: %v", key, err)
+			stripe := fmt.Sprintf("stripe-%d", i)
+			if err := store.PutFragment(storage.Fragment{StripeID: stripe, ShardIndex: 0, Data: []byte("value")}); err != nil {
+				t.Errorf("PutFragment(%q) failed: %v", stripe, err)
 				return
 			}
-			if _, err := store.Get(key); err != nil {
-				t.Errorf("Get(%q) failed: %v", key, err)
+			if _, err := store.GetFragment(stripe, 0); err != nil {
+				t.Errorf("GetFragment(%q) failed: %v", stripe, err)
 			}
 		}(i)
 	}

@@ -5,27 +5,18 @@ import (
 	"time"
 )
 
-// KVStore is the legacy key-value surface used by the transitional Raft FSM.
-// It is removed in task 15 once the metadata-only write path is fully adopted.
-//
-// New code should depend on Store, which embeds KVStore and adds the metadata,
-// fragment, configuration, and observability repositories.
-type KVStore interface {
-	Put(key string, value []byte, isParity bool) error
-	Get(key string) ([]byte, error)
-}
-
 // Store is the production persistence contract for one storage node. Metadata
 // mutations are transactional and advance raft_state.last_applied_index in the
-// same transaction as the metadata change.
+// same transaction as the metadata change. There is no full-value surface: a
+// committed key is metadata plus node-local fragments.
 //
 // Implementations must return ErrNotFound for a missing row and ErrClosed after
 // Close has been called. Other failures should wrap the underlying I/O error so
 // callers can distinguish a missing record from a broken database.
 type Store interface {
-	// Legacy transitional KV methods. Removed in task 15.
-	Put(key string, value []byte, isParity bool) error
-	Get(key string) ([]byte, error)
+	// Ping verifies that the backing store answers after startup and before
+	// shutdown. It is used by the liveness/readiness signal.
+	Ping() error
 
 	// FSM-facing metadata mutations. Each method updates the metadata tables
 	// and raft_state.last_applied_index in one SQLite transaction.

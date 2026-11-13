@@ -1,7 +1,6 @@
 package support
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,8 +14,6 @@ import (
 // their own minimal doubles to avoid import cycles.
 type MockStore struct {
 	mu        sync.RWMutex
-	data      map[string][]byte
-	parity    map[string]bool
 	keys      map[string]storage.KeyMeta
 	stripes   map[string]struct{}
 	fragments map[string]map[int]storage.Fragment
@@ -29,8 +26,6 @@ type MockStore struct {
 // NewMockStore creates a new empty MockStore.
 func NewMockStore() *MockStore {
 	return &MockStore{
-		data:      make(map[string][]byte),
-		parity:    make(map[string]bool),
 		keys:      make(map[string]storage.KeyMeta),
 		stripes:   make(map[string]struct{}),
 		fragments: make(map[string]map[int]storage.Fragment),
@@ -61,30 +56,11 @@ func copyMeta(meta storage.KeyMeta) storage.KeyMeta {
 	return out
 }
 
-// Put stores a copy of the value under the given key.
-func (m *MockStore) Put(key string, value []byte, isParity bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.ready(); err != nil {
-		return err
-	}
-	m.data[key] = copyBytes(value)
-	m.parity[key] = isParity
-	return nil
-}
-
-// Get returns a copy of the value stored under the given key.
-func (m *MockStore) Get(key string) ([]byte, error) {
+// Ping reports ErrClosed after Close.
+func (m *MockStore) Ping() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if err := m.ready(); err != nil {
-		return nil, err
-	}
-	value, ok := m.data[key]
-	if !ok {
-		return nil, fmt.Errorf("%w: key %q", storage.ErrNotFound, key)
-	}
-	return copyBytes(value), nil
+	return m.ready()
 }
 
 // ApplyPutMeta installs metadata and returns the previous record.
@@ -373,40 +349,7 @@ func (m *MockStore) Stats() (storage.StoreStats, error) {
 			stats.FragmentBytes += int64(len(frag.Data))
 		}
 	}
-	for _, value := range m.data {
-		stats.Bytes += int64(len(value))
-	}
 	return stats, nil
-}
-
-// Snapshot serializes the legacy KV space as JSON.
-func (m *MockStore) Snapshot() ([]byte, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if err := m.ready(); err != nil {
-		return nil, err
-	}
-	return json.Marshal(m.data)
-}
-
-// Restore replaces the legacy KV space from a JSON snapshot.
-func (m *MockStore) Restore(data []byte) error {
-	var restored map[string][]byte
-	if err := json.Unmarshal(data, &restored); err != nil {
-		return err
-	}
-	if restored == nil {
-		restored = make(map[string][]byte)
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.ready(); err != nil {
-		return err
-	}
-	m.data = restored
-	m.parity = make(map[string]bool)
-	return nil
 }
 
 // Close marks the store closed.

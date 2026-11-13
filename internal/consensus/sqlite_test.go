@@ -12,9 +12,9 @@ import (
 	"github.com/hashicorp/raft"
 )
 
-// TestRaftSQLiteSnapshotRestore forces a snapshot with the production SQLite
-// store, restarts with a fresh SQLite file, and verifies the FSM restore path
-// rebuilds the legacy KV state from the snapshot.
+// TestRaftSQLiteSnapshotRestore forces a metadata-only snapshot with the
+// production SQLite store, restarts with a fresh SQLite file, and verifies the
+// FSM restore path rebuilds metadata from the snapshot.
 func TestRaftSQLiteSnapshotRestore(t *testing.T) {
 	raftDir := t.TempDir()
 	addr, transport := raft.NewInmemTransport("node1")
@@ -43,7 +43,8 @@ func TestRaftSQLiteSnapshotRestore(t *testing.T) {
 
 	for i := 0; i < 20; i++ {
 		key := fmt.Sprintf("sqlite-key-%02d", i)
-		applyCommand(t, node, Command{Op: OpPut, Legacy: &LegacyOp{Key: key, Value: []byte(key)}})
+		meta := commandTestMeta(key, fmt.Sprintf("stripe-%02d", i), string(redundancy.ModeRS32), 1, []byte(key))
+		applyCommand(t, node, Command{Op: OpPutMeta, Meta: &meta})
 	}
 
 	if err := node.Raft.Snapshot().Error(); err != nil {
@@ -75,9 +76,9 @@ func TestRaftSQLiteSnapshotRestore(t *testing.T) {
 		_ = freshStore.Close()
 	})
 
-	waitForValue(t, freshStore, "sqlite-key-00", "sqlite-key-00", 10*time.Second)
-	waitForValue(t, freshStore, "sqlite-key-19", "sqlite-key-19", 10*time.Second)
-	t.Log("SQLite state restored from the Raft snapshot")
+	waitForMetadata(t, freshStore, "sqlite-key-00", "stripe-00", 10*time.Second)
+	waitForMetadata(t, freshStore, "sqlite-key-19", "stripe-19", 10*time.Second)
+	t.Log("SQLite metadata restored from the Raft snapshot")
 }
 
 func waitSingleLeader(t *testing.T, node *Node) {

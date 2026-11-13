@@ -32,9 +32,6 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		return &Result{Err: ResultErrInvalid}
 	}
 
-	if IsLegacy(cmd.Op) {
-		return f.applyLegacy(cmd)
-	}
 	if !IsMetadata(cmd.Op) {
 		return &Result{Err: ResultErrInvalid}
 	}
@@ -71,36 +68,6 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		return f.applySetConfig(log, cmd)
 	case OpGetConfig:
 		return f.applyGetConfig()
-	default:
-		return &Result{Err: ResultErrInvalid}
-	}
-}
-
-// applyLegacy applies the deprecated full-value put/get commands. It is removed
-// with the legacy path in task 15.
-func (f *FSM) applyLegacy(cmd Command) interface{} {
-	switch cmd.Op {
-	case OpPut:
-		if cmd.Legacy == nil {
-			return &Result{Err: ResultErrInvalid}
-		}
-		if err := f.store.Put(cmd.Legacy.Key, cmd.Legacy.Value, false); err != nil {
-			return resultFromError(err)
-		}
-		return nil
-	case OpGet:
-		key := cmd.Key
-		if cmd.Legacy != nil {
-			key = cmd.Legacy.Key
-		}
-		value, err := f.store.Get(key)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				return &GetResult{Found: false}
-			}
-			return &GetResult{Found: false, Err: ResultErrInternal}
-		}
-		return &GetResult{Value: value, Found: true}
 	default:
 		return &Result{Err: ResultErrInvalid}
 	}

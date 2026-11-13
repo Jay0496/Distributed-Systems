@@ -11,11 +11,9 @@ import (
 	"distributed-kv-store/internal/storage"
 )
 
-// Raft command operations. The legacy put/get operations are transitional and
-// are removed once the write path stops carrying full values through the log.
+// Raft command operations. Every command is metadata-only; payload bytes never
+// enter the replicated log.
 const (
-	OpPut           = "put"
-	OpGet           = "get"
 	OpPutMeta       = "put_meta"
 	OpSetMetaStatus = "set_meta_status"
 	OpGetMeta       = "get_meta"
@@ -39,18 +37,8 @@ const (
 	ResultErrInternal = "internal"
 )
 
-// LegacyOp carries the full-value payload for the transitional put/get commands.
-// It is deliberately nested so metadata commands have no value-shaped field.
-//
-// Deprecated: removed with the legacy full-value path.
-type LegacyOp struct {
-	Key   string `json:"key,omitempty"`
-	Value []byte `json:"value,omitempty"`
-}
-
-// Command is the envelope serialized into the Raft log. Metadata commands carry
-// only a KeyMeta, config, or identifiers; the legacy full-value payload is
-// isolated behind Legacy until task 06 stops writing it.
+// Command is the envelope serialized into the Raft log. It carries only a
+// KeyMeta, config, or identifiers; there is deliberately no value-shaped field.
 type Command struct {
 	Op       string                 `json:"op"`
 	Key      string                 `json:"key,omitempty"`
@@ -59,7 +47,6 @@ type Command struct {
 	Version  int64                  `json:"version,omitempty"`
 	Degraded bool                   `json:"degraded,omitempty"`
 	Config   *storage.ClusterConfig `json:"config,omitempty"`
-	Legacy   *LegacyOp              `json:"legacy,omitempty"`
 }
 
 // Result is returned by the FSM for metadata commands. It uses stable error
@@ -72,16 +59,6 @@ type Result struct {
 	Err     string                 `json:"err,omitempty"`
 }
 
-// GetResult is returned by the FSM for legacy get commands so reads can be
-// served from the committed log (linearizable reads).
-//
-// Deprecated: removed with the legacy full-value path.
-type GetResult struct {
-	Value []byte
-	Found bool
-	Err   string
-}
-
 // IsMetadata reports whether op is one of the metadata-only commands.
 func IsMetadata(op string) bool {
 	switch op {
@@ -90,11 +67,6 @@ func IsMetadata(op string) bool {
 	default:
 		return false
 	}
-}
-
-// IsLegacy reports whether op is one of the transitional full-value commands.
-func IsLegacy(op string) bool {
-	return op == OpPut || op == OpGet
 }
 
 func isMetadataMutation(op string) bool {
@@ -107,13 +79,9 @@ func isMetadataMutation(op string) bool {
 }
 
 // Validate checks the command fields and enforces the metadata size guard.
-// Legacy put/get commands are handled by Apply and are not validated here.
 func (c Command) Validate() error {
 	if !IsMetadata(c.Op) {
 		return fmt.Errorf("unknown metadata command %q", c.Op)
-	}
-	if c.Legacy != nil {
-		return errors.New("metadata command must not carry a legacy payload")
 	}
 
 	switch c.Op {
@@ -165,12 +133,8 @@ func (c Command) Validate() error {
 	return validateMetadataSize(c, nil)
 }
 
-// validateMetadataSize rejects oversized metadata commands. Legacy put/get are
-// exempt during the transition because they still carry full values.
+// validateMetadataSize rejects oversized metadata commands.
 func validateMetadataSize(c Command, raw []byte) error {
-	if !IsMetadata(c.Op) {
-		return nil
-	}
 	if raw == nil {
 		data, err := json.Marshal(c)
 		if err != nil {

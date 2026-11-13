@@ -36,37 +36,6 @@ func applyJSON(t *testing.T, fsm *FSM, cmd Command) interface{} {
 	return fsm.Apply(&raft.Log{Data: data})
 }
 
-func TestFSMPutAndGet(t *testing.T) {
-	store := newTestStore()
-	fsm := NewFSM(store)
-
-	if ret := applyJSON(t, fsm, Command{Op: OpPut, Legacy: &LegacyOp{Key: "k", Value: []byte("v")}}); ret != nil {
-		t.Fatalf("put returned %v", ret)
-	}
-
-	ret := applyJSON(t, fsm, Command{Op: OpGet, Key: "k"})
-	result, ok := ret.(*GetResult)
-	if !ok {
-		t.Fatalf("expected *GetResult, got %T", ret)
-	}
-	if !result.Found || string(result.Value) != "v" {
-		t.Fatalf("unexpected get result: %+v", result)
-	}
-}
-
-func TestFSMGetMissingKey(t *testing.T) {
-	fsm := NewFSM(newTestStore())
-
-	ret := applyJSON(t, fsm, Command{Op: OpGet, Key: "absent"})
-	result, ok := ret.(*GetResult)
-	if !ok {
-		t.Fatalf("expected *GetResult, got %T", ret)
-	}
-	if result.Found {
-		t.Fatalf("expected Found=false, got %+v", result)
-	}
-}
-
 func TestFSMBadJSON(t *testing.T) {
 	fsm := NewFSM(newTestStore())
 
@@ -87,49 +56,9 @@ func TestFSMUnknownOp(t *testing.T) {
 	}
 }
 
-func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
-	store := newTestStore()
-	fsm := NewFSM(store)
-
-	applyJSON(t, fsm, Command{Op: OpPut, Legacy: &LegacyOp{Key: "a", Value: []byte("1")}})
-	applyJSON(t, fsm, Command{Op: OpPut, Legacy: &LegacyOp{Key: "b", Value: []byte("2")}})
-
-	snapshot, err := fsm.Snapshot()
-	if err != nil {
-		t.Fatalf("Snapshot failed: %v", err)
-	}
-
-	sink := &memSink{}
-	if err := snapshot.Persist(sink); err != nil {
-		t.Fatalf("Persist failed: %v", err)
-	}
-	if !sink.closed {
-		t.Fatal("snapshot sink was not closed")
-	}
-	if sink.canceled {
-		t.Fatal("snapshot sink was canceled")
-	}
-
-	restoredStore := newTestStore()
-	restoredFSM := NewFSM(restoredStore)
-	if err := restoredFSM.Restore(io.NopCloser(bytes.NewReader(sink.buf.Bytes()))); err != nil {
-		t.Fatalf("Restore failed: %v", err)
-	}
-
-	for key, want := range map[string]string{"a": "1", "b": "2"} {
-		got, err := restoredStore.Get(key)
-		if err != nil {
-			t.Fatalf("Get(%q) failed: %v", key, err)
-		}
-		if string(got) != want {
-			t.Fatalf("Get(%q) = %q, want %q", key, got, want)
-		}
-	}
-}
-
 func TestFSMSnapshotWithNonSnapshotter(t *testing.T) {
-	// A store that only implements the legacy KV surface must still produce a
-	// valid snapshot.
+	// A store without metadata snapshot support must still produce a valid
+	// envelope and accept a restore as a no-op.
 	fsm := NewFSM(storeWithoutSnapshot{})
 
 	snapshot, err := fsm.Snapshot()
@@ -140,6 +69,16 @@ func TestFSMSnapshotWithNonSnapshotter(t *testing.T) {
 	if err := snapshot.Persist(sink); err != nil {
 		t.Fatalf("Persist failed: %v", err)
 	}
+	var envelope fsmSnapshotEnvelope
+	if err := json.Unmarshal(sink.buf.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode snapshot envelope: %v", err)
+	}
+	if envelope.SchemaVersion != fsmSnapshotSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", envelope.SchemaVersion, fsmSnapshotSchemaVersion)
+	}
+	if len(envelope.Metadata) != 0 || len(envelope.Legacy) != 0 {
+		t.Fatalf("non-snapshot store produced sections: %+v", envelope)
+	}
 	if err := fsm.Restore(io.NopCloser(bytes.NewReader(sink.buf.Bytes()))); err != nil {
 		t.Fatalf("Restore should ignore non-snapshot stores: %v", err)
 	}
@@ -148,9 +87,6 @@ func TestFSMSnapshotWithNonSnapshotter(t *testing.T) {
 type storeWithoutSnapshot struct {
 	storage.Store
 }
-
-func (storeWithoutSnapshot) Put(string, []byte, bool) error { return nil }
-func (storeWithoutSnapshot) Get(string) ([]byte, error)     { return nil, nil }
 
 func newSQLiteFSM(t *testing.T) (*FSM, *storage.SQLiteStore) {
 	t.Helper()
