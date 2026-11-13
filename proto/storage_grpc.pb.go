@@ -36,6 +36,8 @@ const (
 	StorageService_SetConfig_FullMethodName             = "/storage.StorageService/SetConfig"
 	StorageService_ClusterHealth_FullMethodName         = "/storage.StorageService/ClusterHealth"
 	StorageService_Stats_FullMethodName                 = "/storage.StorageService/Stats"
+	StorageService_ForceSnapshot_FullMethodName         = "/storage.StorageService/ForceSnapshot"
+	StorageService_CheckpointStore_FullMethodName       = "/storage.StorageService/CheckpointStore"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -85,6 +87,14 @@ type StorageServiceClient interface {
 	ClusterHealth(ctx context.Context, in *ClusterHealthRequest, opts ...grpc.CallOption) (*ClusterHealthResponse, error)
 	// Stats reports local storage and repair counters. Any node may answer.
 	Stats(ctx context.Context, in *StatsRequest, opts ...grpc.CallOption) (*StatsResponse, error)
+	// ForceSnapshot compacts this node's Raft state into a new snapshot. It is
+	// local to the addressed node and is used by the benchmark harness before
+	// measuring storage. It never forwards and never blocks the leader.
+	ForceSnapshot(ctx context.Context, in *ForceSnapshotRequest, opts ...grpc.CallOption) (*ForceSnapshotResponse, error)
+	// CheckpointStore truncates this node's SQLite write-ahead log and reports
+	// the remaining database size. It is local and used before a storage
+	// measurement so WAL noise does not inflate the result.
+	CheckpointStore(ctx context.Context, in *CheckpointRequest, opts ...grpc.CallOption) (*CheckpointResponse, error)
 }
 
 type storageServiceClient struct {
@@ -319,6 +329,24 @@ func (c *storageServiceClient) Stats(ctx context.Context, in *StatsRequest, opts
 	return out, nil
 }
 
+func (c *storageServiceClient) ForceSnapshot(ctx context.Context, in *ForceSnapshotRequest, opts ...grpc.CallOption) (*ForceSnapshotResponse, error) {
+	out := new(ForceSnapshotResponse)
+	err := c.cc.Invoke(ctx, StorageService_ForceSnapshot_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) CheckpointStore(ctx context.Context, in *CheckpointRequest, opts ...grpc.CallOption) (*CheckpointResponse, error) {
+	out := new(CheckpointResponse)
+	err := c.cc.Invoke(ctx, StorageService_CheckpointStore_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility
@@ -366,6 +394,14 @@ type StorageServiceServer interface {
 	ClusterHealth(context.Context, *ClusterHealthRequest) (*ClusterHealthResponse, error)
 	// Stats reports local storage and repair counters. Any node may answer.
 	Stats(context.Context, *StatsRequest) (*StatsResponse, error)
+	// ForceSnapshot compacts this node's Raft state into a new snapshot. It is
+	// local to the addressed node and is used by the benchmark harness before
+	// measuring storage. It never forwards and never blocks the leader.
+	ForceSnapshot(context.Context, *ForceSnapshotRequest) (*ForceSnapshotResponse, error)
+	// CheckpointStore truncates this node's SQLite write-ahead log and reports
+	// the remaining database size. It is local and used before a storage
+	// measurement so WAL noise does not inflate the result.
+	CheckpointStore(context.Context, *CheckpointRequest) (*CheckpointResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -423,6 +459,12 @@ func (UnimplementedStorageServiceServer) ClusterHealth(context.Context, *Cluster
 }
 func (UnimplementedStorageServiceServer) Stats(context.Context, *StatsRequest) (*StatsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Stats not implemented")
+}
+func (UnimplementedStorageServiceServer) ForceSnapshot(context.Context, *ForceSnapshotRequest) (*ForceSnapshotResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ForceSnapshot not implemented")
+}
+func (UnimplementedStorageServiceServer) CheckpointStore(context.Context, *CheckpointRequest) (*CheckpointResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CheckpointStore not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 
@@ -757,6 +799,42 @@ func _StorageService_Stats_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_ForceSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ForceSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ForceSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ForceSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ForceSnapshot(ctx, req.(*ForceSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_CheckpointStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).CheckpointStore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_CheckpointStore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).CheckpointStore(ctx, req.(*CheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -819,6 +897,14 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Stats",
 			Handler:    _StorageService_Stats_Handler,
+		},
+		{
+			MethodName: "ForceSnapshot",
+			Handler:    _StorageService_ForceSnapshot_Handler,
+		},
+		{
+			MethodName: "CheckpointStore",
+			Handler:    _StorageService_CheckpointStore_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

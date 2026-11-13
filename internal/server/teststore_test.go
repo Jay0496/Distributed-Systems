@@ -299,3 +299,12 @@ func (s *testStore) Stats() (storage.StoreStats, error) {
 	stats.Bytes = stats.FragmentBytes
 	return stats, nil
 }
+
+// Checkpoint models the SQLite WAL checkpoint without filesystem work. It lets
+// handler tests exercise CheckpointStore; the real WAL test lives in
+// internal/storage.
+func (s *testStore) Checkpoint() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return nil
+}

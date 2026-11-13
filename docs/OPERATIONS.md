@@ -43,7 +43,7 @@ few seconds are expected and documented in the logs.
 | `reset.ps1` / `reset.sh` | Destructive reset of containers, network, and volumes | `-Build` / `--build` |
 | `demo.ps1` / `demo.sh` | End-to-end RS/replication, failure, repair, delete | `-Mode`, `-SkipFailure`, `-Keep`, `-ValueSize` |
 | `test.ps1` / `test.sh` | Unit, integration, chaos, bench suites | `-Integration`, `-Chaos`, `-Bench`, `-Keep` |
-| `bench.ps1` / `bench.sh` | Forward arguments to the bench tool | any bench flags |
+| `bench.ps1` / `bench.sh` | Load, storage, recovery, and CPU benchmarks | `-Runs`, `-Duration`, `-Mode`, `-Skip*` |
 
 Every script supports `-Help` / `--help`. `down` is non-destructive; only
 `reset` or `down -Volumes` / `down --volumes` deletes the five data volumes.

@@ -72,8 +72,61 @@ func TestSQLiteReopenPersistence(t *testing.T) {
 	}
 }
 
-// TestUpsertAndMissingKey checks updating an existing chunk and
-// correctly reporting a key that does not exist.
+// TestCheckpointTruncatesWALAndStatsFragmentBytes verifies the benchmark
+// measurement helpers: the checkpoint empties the write-ahead log and Stats
+// reports payload bytes separately from total file size.
+func TestCheckpointTruncatesWALAndStatsFragmentBytes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	const shardSize = 1 << 20
+	payload := bytes.Repeat([]byte{0x5a}, shardSize)
+	for shard := 0; shard < 4; shard++ {
+		if err := store.PutFragment(Fragment{
+			StripeID:   "checkpoint-stripe",
+			ShardIndex: shard,
+			Data:       payload,
+		}); err != nil {
+			t.Fatalf("PutFragment(%d): %v", shard, err)
+		}
+	}
+
+	before, err := store.Stats()
+	if err != nil {
+		t.Fatalf("Stats before checkpoint: %v", err)
+	}
+	if before.FragmentBytes != shardSize*4 {
+		t.Fatalf("fragment bytes = %d, want %d", before.FragmentBytes, shardSize*4)
+	}
+
+	if err := store.Checkpoint(); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	walSize, err := fileSize(dbPath + "-wal")
+	if err != nil {
+		t.Fatalf("stat WAL: %v", err)
+	}
+	if walSize != 0 {
+		t.Fatalf("WAL size after checkpoint = %d, want 0", walSize)
+	}
+
+	after, err := store.Stats()
+	if err != nil {
+		t.Fatalf("Stats after checkpoint: %v", err)
+	}
+	if after.FragmentBytes != before.FragmentBytes {
+		t.Fatalf("fragment bytes changed across checkpoint: before=%d after=%d", before.FragmentBytes, after.FragmentBytes)
+	}
+	if after.Bytes < after.FragmentBytes {
+		t.Fatalf("disk bytes %d < fragment bytes %d", after.Bytes, after.FragmentBytes)
+	}
+}
+
 func TestUpsertAndMissingKey(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "node.db")
 

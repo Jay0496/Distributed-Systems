@@ -59,7 +59,7 @@ state live in BoltDB; snapshots and the SQLite database live on the filesystem.
 cmd/server        process wiring, flags, startup/shutdown
 cmd/gateway       CLI entrypoint (argument parsing and gRPC calls)
 cmd/healthcheck   Compose health probe
-cmd/bench         benchmark harness placeholder
+cmd/bench         benchmark harness: load, storage ratios, recovery, reports
 
 internal/config      environment parsing and validation
 internal/server      gRPC handlers, forwarding, fragment transport
@@ -68,6 +68,7 @@ internal/storage     Store interface, SQLite metadata/fragment/config repositori
 internal/redundancy  RS(3,2), five-copy replication, checksums, deterministic placement
 internal/gateway     consistent-hash entry ring, retrying client, CLI commands, rendering
 internal/cluster     failure detector, prioritized repair queue, repairer, orphan sweep
+internal/bench       load generator, percentiles, storage/recovery collectors, reports
 
 proto/               storage.proto and committed generated code
 tests/               support, unit, integration, chaos, and bench suites

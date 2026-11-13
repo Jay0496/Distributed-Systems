@@ -59,6 +59,16 @@ service StorageService {
 
   // Stats reports local storage and repair counters. Any node may answer.
   rpc Stats (StatsRequest) returns (StatsResponse);
+
+  // ForceSnapshot compacts this node's Raft state into a new snapshot. It is
+  // local to the addressed node and is used by the benchmark harness before
+  // measuring storage. It never forwards and never blocks the leader.
+  rpc ForceSnapshot (ForceSnapshotRequest) returns (ForceSnapshotResponse);
+
+  // CheckpointStore truncates this node's SQLite write-ahead log and reports
+  // the remaining database size. It is local and used before a storage
+  // measurement so WAL noise does not inflate the result.
+  rpc CheckpointStore (CheckpointRequest) returns (CheckpointResponse);
 }
 
 message PutRequest {
@@ -263,6 +273,27 @@ message StatsResponse {
   uint64 repairs_completed = 9;
   uint64 repairs_failed = 10;
   int64 uptime_seconds = 11;
+  // fragment_bytes is the payload bytes stored in this node's fragments table.
+  // It excludes SQLite page and WAL overhead; storage_bytes includes both.
+  uint64 fragment_bytes = 12;
+}
+
+message ForceSnapshotRequest {}
+
+message ForceSnapshotResponse {
+  bool success = 1;
+  string message = 2;
+  // last_index is the Raft last log index when the snapshot completed.
+  uint64 last_index = 3;
+}
+
+message CheckpointRequest {}
+
+message CheckpointResponse {
+  bool success = 1;
+  string message = 2;
+  // bytes_after is the database size in bytes after the WAL checkpoint.
+  int64 bytes_after = 3;
 }
 
 message ClusterHealthRequest {}
