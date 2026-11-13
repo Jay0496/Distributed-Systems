@@ -207,13 +207,17 @@ func (s *Server) ForceSnapshot(ctx context.Context, _ *pb.ForceSnapshotRequest) 
 
 	select {
 	case err := <-done:
-		if err != nil {
+		if err != nil && !errors.Is(err, raft.ErrNothingNewToSnapshot) {
 			return nil, status.Errorf(codes.Internal, "force raft snapshot: %v", err)
 		}
 		lastIndex := s.node.Raft.LastIndex()
+		message := fmt.Sprintf("snapshot complete at last index %d", lastIndex)
+		if errors.Is(err, raft.ErrNothingNewToSnapshot) {
+			message = fmt.Sprintf("raft state already compacted at last index %d", lastIndex)
+		}
 		return &pb.ForceSnapshotResponse{
 			Success:   true,
-			Message:   fmt.Sprintf("snapshot complete at last index %d", lastIndex),
+			Message:   message,
 			LastIndex: lastIndex,
 		}, nil
 	case <-waitCtx.Done():
