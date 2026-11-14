@@ -18,10 +18,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const (
-	forwardedMetadataKey = "x-kv-forwarded"
-	forwardTimeout       = 5 * time.Second
-)
+const forwardedMetadataKey = "x-kv-forwarded"
 
 // dialFunc abstracts gRPC dialing so tests can inject in-memory transports.
 type dialFunc func(ctx context.Context, target string) (*grpc.ClientConn, error)
@@ -123,9 +120,12 @@ func (s *Server) leaderGRPCAddr() (string, bool) {
 // preserves cancellation and the request ID, and caps the attempt at the
 // configured forward limit so a slow leader cannot outlive the client deadline.
 func (s *Server) forwardContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	timeout := forwardTimeout
-	if s.cfg.WriteTimeout > 0 && s.cfg.WriteTimeout < timeout {
-		timeout = s.cfg.WriteTimeout
+	// A write forwarded to the leader must be allowed the full write budget:
+	// a degraded write waits for every shard upload attempt, including dead
+	// owners, before it commits.
+	timeout := s.cfg.WriteTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		if remaining := time.Until(deadline); remaining < timeout {
