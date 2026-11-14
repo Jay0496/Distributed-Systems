@@ -66,6 +66,16 @@ type Server struct {
 	// detector is the leader's cached health map. It is nil in unit tests that
 	// exercise the on-demand ClusterHealth probe.
 	detector *cluster.Detector
+
+	// health owns liveness/readiness and the standard gRPC health service.
+	health healthState
+
+	// rootCtx is the process-lifetime context for background cleanup. It is
+	// canceled by Close so no worker outlives the server.
+	rootCtx    context.Context
+	rootCancel context.CancelFunc
+
+	closeOnce sync.Once
 }
 
 // New builds a Server with its connection cache and dialer.
@@ -75,15 +85,18 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 	if dial == nil {
 		dial = newDialFunc(cfg)
 	}
+	rootCtx, rootCancel := context.WithCancel(context.Background())
 	srv := &Server{
-		store:     store,
-		node:      node,
-		cfg:       cfg,
-		conns:     make(map[string]*grpc.ClientConn),
-		dial:      dial,
-		staging:   newFragmentStaging(),
-		placer:    redundancy.NewPlacer(),
-		startedAt: time.Now(),
+		store:      store,
+		node:       node,
+		cfg:        cfg,
+		conns:      make(map[string]*grpc.ClientConn),
+		dial:       dial,
+		staging:    newFragmentStaging(),
+		placer:     redundancy.NewPlacer(),
+		startedAt:  time.Now(),
+		rootCtx:    rootCtx,
+		rootCancel: rootCancel,
 	}
 	// The method value is bound after construction so Server can own the
 	// default apply implementation without a package-level helper.
@@ -107,6 +120,7 @@ func New(cfg config.Config, store storage.Store, node *consensus.Node, dial dial
 		Capacity:    repairQueueCapacity,
 		Timeout:     cfg.WriteTimeout + cfg.ReadTimeout,
 		MaxAttempts: cfg.RepairMaxAttempts,
+		RootContext: rootCtx,
 	}, srv.repairer.Process)
 	if queue, ok := srv.repairQueue.(*cluster.Queue); ok {
 		srv.repairer.SetQueue(queue)
@@ -142,14 +156,23 @@ func (s *Server) AttachFailureManagement(ctx context.Context, detector *cluster.
 	s.StartFailureManagement(ctx)
 }
 
-// Close stops background repair workers. It is safe to call more than once.
+// Close marks the node not ready, cancels process-lifetime background work,
+// stops repair workers, and closes every cached peer connection. It is safe to
+// call more than once.
 func (s *Server) Close() error {
-	if s.repairer != nil {
-		s.repairer.Stop()
-	}
-	if s.repairQueue != nil {
-		s.repairQueue.Close()
-	}
+	s.closeOnce.Do(func() {
+		s.MarkShuttingDown()
+		if s.rootCancel != nil {
+			s.rootCancel()
+		}
+		if s.repairer != nil {
+			s.repairer.Stop()
+		}
+		if s.repairQueue != nil {
+			s.repairQueue.Close()
+		}
+		s.DropConnections()
+	})
 	return nil
 }
 
@@ -186,12 +209,6 @@ func (s *Server) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, 
 		return s.forwardGet(ctx, req)
 	}
 	return s.read(ctx, req)
-}
-
-// Heartbeat is the legacy liveness probe kept for compatibility. Real health
-// checks use grpc.health.v1.
-func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
-	return &pb.HeartbeatResponse{Alive: true}, nil
 }
 
 // Join asks the current leader to add a new voter to the Raft cluster.

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -10,13 +9,12 @@ import (
 )
 
 // testStore is a minimal in-memory Store used by the server component tests.
-// It implements the legacy KV methods and the fragment repository; the
-// remaining Store methods are supplied by the embedded interface.
+// It implements the metadata and fragment repositories; the remaining Store
+// methods are supplied by the embedded interface.
 type testStore struct {
 	storage.Store
 
 	mu        sync.RWMutex
-	data      map[string][]byte
 	fragments map[string]map[int]storage.Fragment
 	metas     map[string]storage.KeyMeta
 	applied   uint64
@@ -26,51 +24,13 @@ type testStore struct {
 
 func newTestStore() *testStore {
 	return &testStore{
-		data:      make(map[string][]byte),
 		fragments: make(map[string]map[int]storage.Fragment),
 		metas:     make(map[string]storage.KeyMeta),
 	}
 }
 
-func (s *testStore) Put(key string, value []byte, _ bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	copied := make([]byte, len(value))
-	copy(copied, value)
-	s.data[key] = copied
-	return nil
-}
-
-func (s *testStore) Get(key string) ([]byte, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	value, ok := s.data[key]
-	if !ok {
-		return nil, fmt.Errorf("%w: key %q", storage.ErrNotFound, key)
-	}
-	copied := make([]byte, len(value))
-	copy(copied, value)
-	return copied, nil
-}
-
-func (s *testStore) Snapshot() ([]byte, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return json.Marshal(s.data)
-}
-
-func (s *testStore) Restore(data []byte) error {
-	var restored map[string][]byte
-	if err := json.Unmarshal(data, &restored); err != nil {
-		return err
-	}
-	if restored == nil {
-		restored = make(map[string][]byte)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.data = restored
+// Ping always succeeds for the in-memory store.
+func (s *testStore) Ping() error {
 	return nil
 }
 

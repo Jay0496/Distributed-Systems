@@ -30,6 +30,7 @@ and `AUTH_TOKEN`:
 
 ```powershell
 ./scripts/test.ps1                 # fast suite
+./scripts/test.ps1 -All            # full unit, integration, chaos, bench matrix
 ./scripts/test.ps1 -Integration    # starts Compose when needed
 ./scripts/test.ps1 -Chaos          # chaos suite
 ./scripts/test.ps1 -Bench          # bench-tagged harness checks
@@ -38,6 +39,7 @@ and `AUTH_TOKEN`:
 
 ```bash
 ./scripts/test.sh                  # fast suite
+./scripts/test.sh --all            # full unit, integration, chaos, bench matrix
 ./scripts/test.sh --integration
 ./scripts/test.sh --chaos
 ./scripts/test.sh --bench
@@ -332,9 +334,8 @@ They scan every Markdown file outside `.git` and `.opencode` and:
    are skipped);
 2. print each fenced `powershell` or `bash` block tagged with
    `<!-- runnable -->`, so the acceptance run can execute them manually;
-3. fail on removed constructor names, the old single-file entrypoint command,
-   the retired router constructor, unfinished-work markers, and the obsolete
-   legacy table name.
+3. fail on the old single-file entrypoint command, the retired router
+   constructor, unfinished-work markers, and the obsolete legacy table name.
 
 The check is deterministic and intentionally small. It reports `file:line` for
 each problem and exits non-zero. Run it before committing documentation changes

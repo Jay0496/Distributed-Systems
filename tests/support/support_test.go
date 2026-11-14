@@ -17,8 +17,8 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
-func TestMockStoreConcurrentAccess(t *testing.T) {
-	store := support.NewMockStore()
+func TestMemoryStoreConcurrentAccess(t *testing.T) {
+	store := support.NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })
 
 	const workers = 64
@@ -27,19 +27,19 @@ func TestMockStoreConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			key := support.Key("concurrent", i)
+			stripe := support.Key("concurrent", i)
 			value := support.RandomValue(int64(i), 128)
-			if err := store.Put(key, value, false); err != nil {
-				t.Errorf("Put(%q): %v", key, err)
+			if err := store.PutFragment(storage.Fragment{StripeID: stripe, ShardIndex: 0, Data: value}); err != nil {
+				t.Errorf("PutFragment(%q): %v", stripe, err)
 				return
 			}
-			got, err := store.Get(key)
+			got, err := store.GetFragment(stripe, 0)
 			if err != nil {
-				t.Errorf("Get(%q): %v", key, err)
+				t.Errorf("GetFragment(%q): %v", stripe, err)
 				return
 			}
-			if !bytes.Equal(got, value) {
-				t.Errorf("Get(%q) = %d bytes, want %d", key, len(got), len(value))
+			if !bytes.Equal(got.Data, value) {
+				t.Errorf("GetFragment(%q) = %d bytes, want %d", stripe, len(got.Data), len(value))
 			}
 		}(i)
 	}
@@ -150,18 +150,21 @@ func TestClusterHarnessWritesReadsAndRestarts(t *testing.T) {
 	}
 }
 
-func TestMockStoreSentinelErrors(t *testing.T) {
-	store := support.NewMockStore()
+func TestMemoryStoreSentinelErrors(t *testing.T) {
+	store := support.NewMemoryStore()
 	if _, err := store.GetFragment("missing", 0); err == nil {
 		t.Fatal("missing fragment returned no error")
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := store.Get("key"); err != storage.ErrClosed {
-		t.Fatalf("Get after Close = %v, want ErrClosed", err)
+	if _, err := store.GetFragment("stripe", 0); err != storage.ErrClosed {
+		t.Fatalf("GetFragment after Close = %v, want ErrClosed", err)
 	}
 	if _, err := store.LastAppliedIndex(); err != storage.ErrClosed {
 		t.Fatalf("LastAppliedIndex after Close = %v, want ErrClosed", err)
+	}
+	if err := store.Ping(); err != storage.ErrClosed {
+		t.Fatalf("Ping after Close = %v, want ErrClosed", err)
 	}
 }

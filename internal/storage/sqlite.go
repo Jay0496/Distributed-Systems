@@ -71,56 +71,6 @@ func openDB(dbPath string, busyTimeout time.Duration) (*sql.DB, error) {
 	return db, nil
 }
 
-// SaveChunk inserts or updates a legacy full-value chunk in the local
-// database. isParity identifies Reed-Solomon parity fragments.
-func SaveChunk(db *sql.DB, key string, value []byte, isParity bool) error {
-	if db == nil {
-		return errors.New("database connection is nil")
-	}
-	if key == "" {
-		return errors.New("chunk key cannot be empty")
-	}
-	if value == nil {
-		return errors.New("chunk value cannot be nil")
-	}
-
-	query := `
-	INSERT INTO store (key, value, is_parity)
-	VALUES (?, ?, ?)
-	ON CONFLICT(key) DO UPDATE SET
-		value = excluded.value,
-		is_parity = excluded.is_parity,
-		updated_at = CURRENT_TIMESTAMP;`
-
-	if _, err := db.Exec(query, key, value, isParity); err != nil {
-		return fmt.Errorf("save chunk %q: %w", key, err)
-	}
-
-	return nil
-}
-
-// GetChunk retrieves the legacy full-value chunk for a key. Missing keys return
-// an error wrapping ErrNotFound.
-func GetChunk(db *sql.DB, key string) ([]byte, error) {
-	if db == nil {
-		return nil, errors.New("database connection is nil")
-	}
-	if key == "" {
-		return nil, errors.New("chunk key cannot be empty")
-	}
-
-	var value []byte
-	err := db.QueryRow("SELECT value FROM store WHERE key = ?", key).Scan(&value)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("%w: chunk %q", ErrNotFound, key)
-		}
-		return nil, fmt.Errorf("get chunk %q: %w", key, err)
-	}
-
-	return value, nil
-}
-
 // SQLiteStore is the production persistent Store implementation.
 type SQLiteStore struct {
 	db     *sql.DB
@@ -150,20 +100,15 @@ func (s *SQLiteStore) ready() error {
 	return nil
 }
 
-// Put implements the legacy KVStore.Put method.
-func (s *SQLiteStore) Put(key string, value []byte, isParity bool) error {
+// Ping verifies that the database still answers a trivial query.
+func (s *SQLiteStore) Ping() error {
 	if err := s.ready(); err != nil {
 		return err
 	}
-	return SaveChunk(s.db, key, value, isParity)
-}
-
-// Get implements the legacy KVStore.Get method.
-func (s *SQLiteStore) Get(key string) ([]byte, error) {
-	if err := s.ready(); err != nil {
-		return nil, err
+	if err := s.db.Ping(); err != nil {
+		return fmt.Errorf("ping SQLite store: %w", err)
 	}
-	return GetChunk(s.db, key)
+	return nil
 }
 
 // Checkpoint truncates the write-ahead log. It is useful before measuring

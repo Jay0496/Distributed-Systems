@@ -487,6 +487,7 @@ Commands:
   health  Print one health line; exits non-zero when the cluster is unhealthy
   stats   Show storage and repair counters from the leader
   repair  Enqueue a repair: repair <key> [--stripe ID] [--force] [--json]
+  version Print the release version
   help    Show this help
 
 Run "gateway <command> --help" for command details.

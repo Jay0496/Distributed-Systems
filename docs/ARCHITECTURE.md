@@ -83,9 +83,9 @@ Dependency direction:
   `cmd/*`.
 - `tests/support` is test-only; production packages must not import it.
 
-The package move was behaviour-preserving. `internal/storage.MockStore` was
-removed from production in the SQLite task and now lives in `tests/support`.
-`internal/redundancy` now contains the real RS(3,2) and five-copy replication
+The package move was behaviour-preserving. The in-memory store lives only in
+`tests/support`; production uses SQLite. `internal/redundancy` now contains the real
+RS(3,2) and five-copy replication
 engines, checksums, and deterministic placement; the no-op placeholder was
 removed. See [tests/README.md](../tests/README.md) and
 [internal/redundancy/README.md](../internal/redundancy/README.md).
@@ -187,32 +187,29 @@ Expected failures are returned as `Result.Err` with stable codes (`conflict`,
 `invalid`, `not_found`, `internal`) rather than Go errors; a Raft apply panic is
 fatal, so a rejected command must never panic.
 
-The command envelope has no top-level value field. The transitional legacy
-operations keep the old full-value payload inside a nested `LegacyOp`, which is
-marked deprecated. Metadata commands are limited to 64 KiB of encoded JSON; the
-legacy operations are temporarily exempt. Neither `Put` nor `Get` uses the
-legacy commands any more: writes use `put_meta` and reads use `get_meta` plus
-fragment gathering. The transitional legacy commands and their snapshot section
-remain only for upgrade compatibility and are removed in the final cleanup.
+The command envelope has no value-shaped field. Every command is metadata-only
+and limited to 64 KiB of encoded JSON. Writes use `put_meta`; reads use
+`get_meta` plus fragment gathering. The previous full-value `put`/`get`
+commands and `KVStore` surface were removed in the release cleanup.
 
 ### Snapshots
 
-The FSM owns a versioned snapshot envelope:
+The FSM owns a versioned, metadata-only snapshot envelope:
 
 ```json
 {
-  "schema_version": 2,
-  "metadata": { "stripes": [], "keys": [], "config": {}, "last_applied_index": 0 },
-  "legacy": []
+  "schema_version": 3,
+  "metadata": { "stripes": [], "keys": [], "config": {}, "last_applied_index": 0 }
 }
 ```
 
 The `metadata` section contains stripes, key metadata, placements, and the
 singleton cluster config, plus `last_applied_index`. It never contains fragment
-payloads. The `legacy` section contains the transitional KV rows and is retained
-for upgrade compatibility. Restore rejects unknown schema versions, restores both sections in
-one SQLite transaction, and still accepts the version 1 single-section snapshot
-and the pre-SQLite raw map for upgrade safety. Restoring
+payloads. Restore rejects unknown schema versions and writes metadata in one
+SQLite transaction. Version 2 snapshots are accepted when their transitional
+`legacy` section is empty; a non-empty section fails with an export instruction
+because legacy values cannot be converted to stripes. Version 1 metadata
+snapshots and empty pre-SQLite raw maps remain readable. Restoring
 `last_applied_index` prevents older log entries from being re-applied on top of
 a newer SQLite state.
 
@@ -620,7 +617,7 @@ check) and discover the existing cluster through their persisted state or, if
 
 ```
 /data/
-├── node.db              # SQLite metadata, local fragments, legacy KV state
+├── node.db              # SQLite metadata and local fragments
 ├── node.db-wal          # SQLite write-ahead log (present while open)
 ├── node.db-shm          # SQLite shared-memory index (present while open)
 ├── raft.db              # BoltDB buckets: logs, stable (term/vote), configuration
@@ -630,18 +627,18 @@ check) and discover the existing cluster through their persisted state or, if
 ```
 
 SQLite is opened before Raft starts and closed after Raft and gRPC stop. It
-holds the legacy full-value `store` table during the transition, the metadata
-tables used by later tasks (`keys`, `stripes`, `placements`), local `fragments`,
-the singleton `cluster_config`, and `raft_state.last_applied_index`.
+holds the metadata tables (`keys`, `stripes`, `placements`), local `fragments`,
+the singleton `cluster_config`, `schema_migrations`, and
+`raft_state.last_applied_index`. A database from an earlier release may still
+have the transitional `store` table; an empty table is dropped, while a
+non-empty table fails startup with an export instruction.
 
-Raft snapshots use the FSM's `schema_version: 2` envelope. The metadata section
-covers the `keys`, `stripes`, `placements`, `cluster_config`, and
-`raft_state` tables and deliberately excludes fragment payloads: fragments are
-durable on their owner nodes and repaired from peers when missing. The write path
-no longer writes the legacy `store` table, but the envelope still carries the
-legacy section for upgrade compatibility. Restore applies both
-sections in one transaction and still accepts version 1 snapshots and the
-pre-SQLite raw map.
+Raft snapshots use the FSM's `schema_version: 3` metadata-only envelope. The
+metadata section covers the `keys`, `stripes`, `placements`, `cluster_config`,
+and `raft_state` tables and deliberately excludes fragment payloads: fragments
+are durable on their owner nodes and repaired from peers when missing. Restore
+applies metadata in one transaction. Version 2 snapshots are accepted only when
+their legacy section is empty, and version 1 metadata snapshots remain readable.
 
 The `fragments` table is written by the fragment transport v2 upload handler.
 The leader write path calls that handler for remote owners and writes its local

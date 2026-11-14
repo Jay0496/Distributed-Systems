@@ -12,7 +12,7 @@ The schema is additive and created idempotently by `storage.Open` /
 
 | Table | Purpose |
 | --- | --- |
-| `store` | Legacy full-value KV rows. Transitional; removed in task 15. |
+| `schema_migrations` | Applied schema versions; records the release cleanup. |
 | `stripes` | One row per immutable stripe: key, mode, size, checksum. |
 | `keys` | Current metadata per key: stripe, mode, size, checksum, version, degraded. |
 | `placements` | Deterministic owner (`node_id`) for each global shard index `0..4`. |
@@ -29,9 +29,11 @@ commits or after its stripe is superseded, and the orphan sweep removes it.
 
 ## Store interface
 
-`storage.Store` embeds the transitional legacy `KVStore` methods (`Put`, `Get`)
-and adds:
+`storage.Store` exposes metadata, fragments, configuration, and observability.
+There is no full-value surface; a committed key is metadata plus node-local
+fragments.
 
+- liveness: `Ping`
 - metadata mutations: `ApplyPutMeta`, `ApplyMetaStatus`, `ApplyDeleteMeta`,
   `ApplySetConfig`
 - metadata reads: `GetKey`, `ListKeys`, `LastAppliedIndex`
@@ -47,24 +49,21 @@ stored index is a replay and is a no-op. Version conflicts return
 `storage.ErrConflict`; missing rows return `storage.ErrNotFound`; a closed store
 returns `storage.ErrClosed`. All three support `errors.Is`.
 
-`SQLiteStore` implements `storage.Store` and `storage.Snapshotter`. The test
-double lives in `tests/support`; production packages must not import it.
+`SQLiteStore` implements `storage.Store`. The in-memory test double lives in
+`tests/support`; production packages must not import it.
 
 ## Snapshots
 
-Two snapshot formats are implemented:
+`SnapshotMetadata` / `RestoreMetadata` cover stripes, keys, placements, cluster
+config, and the applied index. They never include fragment payloads. Restore
+clears and reinserts metadata in dependency order inside a single transaction.
+The storage-level envelope uses `schema_version`, `kind`, and `payload`; the
+consensus FSM wraps the raw payload in its own version 3 envelope. Unknown
+schema versions are rejected.
 
-- `Snapshot` / `Restore` cover the legacy `store` table. This is the path the
-  transitional FSM uses today. `Restore` also accepts the raw
-  `map[string][]byte` JSON written by the previous in-memory store, so an
-  existing `/data/snapshots` directory survives the upgrade.
-- `SnapshotMetadata` / `RestoreMetadata` cover stripes, keys, placements,
-  cluster config, and the applied index. They never include fragment payloads.
-  Restore clears and reinserts metadata in dependency order inside a single
-  transaction.
-
-Both use a versioned JSON envelope (`schema_version`, `kind`, `payload`).
-Unknown schema versions are rejected.
+The transitional `store` table from earlier releases is inspected during
+startup. An empty table is dropped and the migration recorded in
+`schema_migrations`; a non-empty table fails startup with an export instruction.
 
 ## WAL and shutdown
 
@@ -93,11 +92,11 @@ docker run --rm -v "${PWD}:/app" -w /app golang:1.22 go test -race ./internal/st
 docker run --rm -v "${PWD}:/app" -w /app golang:1.22 go test -race ./internal/storage -run TestSQLiteReopenPersistence -v
 ```
 
-The storage tests cover schema idempotency, metadata transactions, replay
-no-ops, version conflicts, fragment checksums, cascade deletes, config
-singletons, stats, concurrent writers, legacy snapshots, and metadata snapshot
-restore. Repository tests use temporary SQLite databases so the test double
-cannot drift from the schema.
+The storage tests cover schema idempotency, the guarded `store`-table
+migration, metadata transactions, replay no-ops, version conflicts, fragment
+checksums, cascade deletes, config singletons, stats, concurrent writers, and
+metadata snapshot restore. Repository tests use temporary SQLite databases so
+the in-memory test double cannot drift from the schema.
 
 ## Resetting data
 

@@ -10,7 +10,9 @@
 .PARAMETER Chaos
     Run the chaos-tagged in-process failure tests.
 .PARAMETER Bench
-    Run the benchmark-tagged suites (placeholder until the benchmark task).
+    Run the benchmark-tagged suites.
+.PARAMETER All
+    Run the full unit, integration, chaos, and benchmark matrix.
 .PARAMETER Keep
     Leave a cluster that this script started running after the tests finish.
 .PARAMETER Timeout
@@ -23,6 +25,7 @@ param(
     [switch]$Integration,
     [switch]$Chaos,
     [switch]$Bench,
+    [switch]$All,
     [switch]$Keep,
     [int]$Timeout = 120,
     [switch]$Help
@@ -32,7 +35,7 @@ param(
 
 if ($Help) {
     Show-ScriptHelp @'
-Usage: scripts/test.ps1 [-Unit] [-Integration] [-Chaos] [-Bench] [-Keep] [-Timeout SECONDS] [-Help]
+Usage: scripts/test.ps1 [-Unit] [-Integration] [-Chaos] [-Bench] [-All] [-Keep] [-Timeout SECONDS] [-Help]
 
 Runs Go tests inside golang:1.22 containers. No host Go installation is needed.
 
@@ -42,6 +45,7 @@ Suites (combine switches to run more than one; Unit is the default):
                  integration-tagged suite on distributed-systems_cluster-net
   -Chaos         runs the chaos-tagged failure suite
   -Bench         runs the benchmark-tagged suite
+  -All           runs Unit, Integration, Chaos, and Bench
 
 Options:
   -Keep              Leave a cluster started by this script running
@@ -52,6 +56,7 @@ Examples:
   ./scripts/test.ps1
   ./scripts/test.ps1 -Integration -Keep
   ./scripts/test.ps1 -Unit -Chaos
+  ./scripts/test.ps1 -All
 
 Exit codes:
   0  every selected suite passed
@@ -60,6 +65,12 @@ Exit codes:
     exit 0
 }
 
+if ($All) {
+    $Unit = $true
+    $Integration = $true
+    $Chaos = $true
+    $Bench = $true
+}
 if (-not ($Unit -or $Integration -or $Chaos -or $Bench)) {
     $Unit = $true
 }

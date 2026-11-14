@@ -2,96 +2,10 @@ package storage_test
 
 import (
 	"encoding/json"
-	"errors"
 	"testing"
 
 	"distributed-kv-store/internal/storage"
 )
-
-func TestLegacySnapshotRoundTrip(t *testing.T) {
-	source := newStore(t)
-	if err := source.Put("alpha", []byte("one"), false); err != nil {
-		t.Fatalf("Put alpha: %v", err)
-	}
-	if err := source.Put("beta", []byte("two"), true); err != nil {
-		t.Fatalf("Put beta: %v", err)
-	}
-
-	snapshot, err := source.Snapshot()
-	if err != nil {
-		t.Fatalf("Snapshot: %v", err)
-	}
-
-	target := newStore(t)
-	if err := target.Restore(snapshot); err != nil {
-		t.Fatalf("Restore: %v", err)
-	}
-	for key, want := range map[string]string{"alpha": "one", "beta": "two"} {
-		got, err := target.Get(key)
-		if err != nil {
-			t.Fatalf("Get(%q): %v", key, err)
-		}
-		if string(got) != want {
-			t.Fatalf("Get(%q) = %q, want %q", key, got, want)
-		}
-	}
-}
-
-func TestLegacyRestoreReplacesState(t *testing.T) {
-	source := newStore(t)
-	if err := source.Put("kept", []byte("value"), false); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	snapshot, err := source.Snapshot()
-	if err != nil {
-		t.Fatalf("Snapshot: %v", err)
-	}
-
-	target := newStore(t)
-	if err := target.Put("stale", []byte("old"), false); err != nil {
-		t.Fatalf("Put stale: %v", err)
-	}
-	if err := target.Restore(snapshot); err != nil {
-		t.Fatalf("Restore: %v", err)
-	}
-
-	if _, err := target.Get("stale"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("stale key survived restore: %v", err)
-	}
-	if value, err := target.Get("kept"); err != nil || string(value) != "value" {
-		t.Fatalf("kept key = %q, %v", value, err)
-	}
-}
-
-func TestLegacyRestoreAcceptsRawJSONMap(t *testing.T) {
-	// The pre-SQLite MockStore wrote a bare map[string][]byte snapshot. An
-	// existing snapshot directory must still restore after the upgrade.
-	legacy, err := json.Marshal(map[string][]byte{"raw": []byte("raw-value")})
-	if err != nil {
-		t.Fatalf("marshal legacy snapshot: %v", err)
-	}
-
-	store := newStore(t)
-	if err := store.Restore(legacy); err != nil {
-		t.Fatalf("Restore legacy map: %v", err)
-	}
-	value, err := store.Get("raw")
-	if err != nil || string(value) != "raw-value" {
-		t.Fatalf("Get(raw) = %q, %v", value, err)
-	}
-}
-
-func TestLegacySnapshotRejectsCorruption(t *testing.T) {
-	store := newStore(t)
-	if err := store.Restore([]byte("{not-json")); err == nil {
-		t.Fatal("corrupt snapshot was accepted")
-	}
-
-	unknown := []byte(`{"schema_version":99,"kind":"legacy","payload":[]}`)
-	if err := store.Restore(unknown); err == nil {
-		t.Fatal("unknown snapshot version was accepted")
-	}
-}
 
 func TestSQLiteMetadataSnapshotRestore(t *testing.T) {
 	source := newStore(t)
@@ -149,9 +63,6 @@ func TestSQLiteMetadataSnapshotRestore(t *testing.T) {
 	}
 	if stats.FragmentCount != 0 {
 		t.Fatalf("metadata snapshot included fragments: %+v", stats)
-	}
-	if _, err := target.Get("anything"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("legacy KV should be untouched by metadata restore: %v", err)
 	}
 }
 

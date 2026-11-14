@@ -6,6 +6,8 @@ x-common-env: &common-env
   # Empty disables auth. Set the same value for every node and every tool.
   AUTH_TOKEN: ${AUTH_TOKEN:-}
   MAX_MESSAGE_SIZE: ${MAX_MESSAGE_SIZE:-33554432}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-30s}
 
 x-healthcheck: &healthcheck
   interval: 5s

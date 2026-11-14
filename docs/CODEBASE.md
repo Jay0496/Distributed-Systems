@@ -31,10 +31,12 @@ internal/
     gc.go               old-stripe fragment garbage collection
     admin.go            GetConfig, SetConfig, Delete, ClusterHealth, Stats
     auth.go             bearer-token interceptors and health exemption
+    health.go           liveness, readiness, heartbeat, health service update
+    shutdown.go         ordered, idempotent graceful shutdown helper
     errors.go           gRPC status mapping helpers
   consensus/            Raft and the metadata FSM
     raft.go             Raft node, BoltDB log, file snapshots, bootstrap, Join
-    fsm.go              Apply, Get, snapshot/restore
+    fsm.go              metadata apply, snapshot/restore
     command.go          command envelope, metadata validation, size guard
     snapshot.go         versioned snapshot envelope
   storage/              persistence boundary
@@ -65,7 +67,10 @@ internal/
     cli.go              command parsing and dispatch
     render.go           text and JSON output
   bench/                load, storage, recovery, report logic
+  logging/              slog JSON/text logger and request attrs
+  version/              release version, stamped with -ldflags
   rpc/credentials.go    shared dial options, bearer metadata, message size
+  rpc/requestid.go      request-ID propagation and interceptors
 
 proto/storage.proto     gRPC contract; generated files are committed
 scripts/                PowerShell and bash wrappers; no host Go

@@ -3,11 +3,12 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"sync"
 
 	"distributed-kv-store/internal/redundancy"
+	"distributed-kv-store/internal/rpc"
 	"distributed-kv-store/internal/storage"
 
 	pb "distributed-kv-store/proto"
@@ -132,8 +133,13 @@ func (s *Server) pushShards(ctx context.Context, stripeID string, shards []redun
 			stored = append(stored, outcome.placement)
 			continue
 		}
-		log.Printf("write: shard upload failed stripe=%s shard=%d owner=%s error=%v",
-			stripeID, outcome.placement.ShardIndex, outcome.placement.NodeID, outcome.err)
+		slog.Warn("shard upload failed",
+			"stripe_id", stripeID,
+			"shard_index", outcome.placement.ShardIndex,
+			"owner", outcome.placement.NodeID,
+			"error", outcome.err,
+			"request_id", rpc.RequestID(ctx),
+		)
 	}
 	sort.Slice(stored, func(i, j int) bool {
 		return stored[i].ShardIndex < stored[j].ShardIndex

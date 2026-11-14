@@ -31,7 +31,7 @@ func (s *Server) GetConfig(ctx context.Context, req *pb.GetConfigRequest) (*pb.C
 	if s.node.Raft.State() != raft.Leader {
 		return s.forwardGetConfig(ctx, req)
 	}
-	return s.getConfig()
+	return s.getConfig(ctx)
 }
 
 // SetConfig validates and commits a new cluster-wide default mode. Only the
@@ -52,7 +52,7 @@ func (s *Server) SetConfig(ctx context.Context, req *pb.SetConfigRequest) (*pb.C
 	if s.node.Raft.State() != raft.Leader {
 		return s.forwardSetConfig(ctx, req)
 	}
-	return s.setConfig(mode)
+	return s.setConfig(ctx, mode)
 }
 
 // Delete removes a key's metadata through Raft and then garbage-collects the
@@ -71,13 +71,13 @@ func (s *Server) Delete(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteR
 	if s.node.Raft.State() != raft.Leader {
 		return s.forwardDelete(ctx, req)
 	}
-	return s.deleteKey(req)
+	return s.deleteKey(ctx, req)
 }
 
 // deleteKey applies delete_meta on the leader and only then removes fragments.
 // The FSM returns the full old metadata atomically with the version check, so
 // a concurrent write cannot slip between the check and the delete.
-func (s *Server) deleteKey(req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
+func (s *Server) deleteKey(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
 	data, err := marshalCommand(consensus.Command{
 		Op:      consensus.OpDeleteMeta,
 		Key:     req.GetKey(),
@@ -87,7 +87,7 @@ func (s *Server) deleteKey(req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	response, err := s.apply(data, s.cfg.WriteTimeout)
+	response, err := s.applyContext(ctx, data)
 	if err != nil {
 		return nil, adminStatusError("delete metadata", err)
 	}
@@ -114,7 +114,7 @@ func (s *Server) deleteKey(req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
 	// every node. Fragment deletion is therefore a fragment-only cleanup and
 	// runs after the commit, never before it. A partial failure leaves the
 	// remainder to task 09's orphan sweep.
-	gcCtx, cancel := context.WithTimeout(context.Background(), gcTimeout)
+	gcCtx, cancel := context.WithTimeout(ctx, gcTimeout)
 	s.deleteStripeFragments(gcCtx, old.StripeID, old.Placement)
 	cancel()
 
@@ -564,12 +564,12 @@ func nonNegative(value int64) uint64 {
 
 // getConfig applies a get_config command on the leader. The FSM reports the
 // rs32 default when no configuration has been committed yet.
-func (s *Server) getConfig() (*pb.ConfigResponse, error) {
+func (s *Server) getConfig(ctx context.Context) (*pb.ConfigResponse, error) {
 	data, err := marshalCommand(consensus.Command{Op: consensus.OpGetConfig})
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	response, err := s.apply(data, s.cfg.WriteTimeout)
+	response, err := s.applyContext(ctx, data)
 	if err != nil {
 		return nil, adminStatusError("read config", err)
 	}
@@ -592,13 +592,13 @@ func (s *Server) getConfig() (*pb.ConfigResponse, error) {
 }
 
 // setConfig applies a set_config command on the leader and waits for commit.
-func (s *Server) setConfig(mode string) (*pb.ConfigResponse, error) {
+func (s *Server) setConfig(ctx context.Context, mode string) (*pb.ConfigResponse, error) {
 	cfg := storage.ClusterConfig{DefaultMode: mode}
 	data, err := marshalCommand(consensus.Command{Op: consensus.OpSetConfig, Config: &cfg})
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	response, err := s.apply(data, s.cfg.WriteTimeout)
+	response, err := s.applyContext(ctx, data)
 	if err != nil {
 		return nil, adminStatusError("commit config", err)
 	}

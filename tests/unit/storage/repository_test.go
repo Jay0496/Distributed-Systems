@@ -490,14 +490,17 @@ func TestStoreClosesCleanly(t *testing.T) {
 	if _, err := store.GetKey("alpha"); !errors.Is(err, storage.ErrClosed) {
 		t.Fatalf("GetKey after Close = %v, want ErrClosed", err)
 	}
-	if err := store.Put("alpha", []byte("v"), false); !errors.Is(err, storage.ErrClosed) {
-		t.Fatalf("Put after Close = %v, want ErrClosed", err)
+	if err := store.PutFragment(storage.Fragment{StripeID: "stripe-closed", ShardIndex: 0, Data: []byte("v")}); !errors.Is(err, storage.ErrClosed) {
+		t.Fatalf("PutFragment after Close = %v, want ErrClosed", err)
+	}
+	if err := store.Ping(); !errors.Is(err, storage.ErrClosed) {
+		t.Fatalf("Ping after Close = %v, want ErrClosed", err)
 	}
 }
 
-func TestLegacyGetMissingKeyIsNotFound(t *testing.T) {
+func TestGetKeyMissingIsNotFound(t *testing.T) {
 	store := newStore(t)
-	if _, err := store.Get("missing"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("Get(missing) = %v, want ErrNotFound", err)
+	if _, err := store.GetKey("missing"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetKey(missing) = %v, want ErrNotFound", err)
 	}
 }

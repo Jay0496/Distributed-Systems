@@ -18,10 +18,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const (
-	forwardedMetadataKey = "x-kv-forwarded"
-	forwardTimeout       = 5 * time.Second
-)
+const forwardedMetadataKey = "x-kv-forwarded"
 
 // dialFunc abstracts gRPC dialing so tests can inject in-memory transports.
 type dialFunc func(ctx context.Context, target string) (*grpc.ClientConn, error)
@@ -119,6 +116,28 @@ func (s *Server) leaderGRPCAddr() (string, bool) {
 	return target, ok
 }
 
+// forwardContext derives one forwarding attempt from the incoming request. It
+// preserves cancellation and the request ID, and caps the attempt at the
+// configured forward limit so a slow leader cannot outlive the client deadline.
+func (s *Server) forwardContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	// A write forwarded to the leader must be allowed the full write budget:
+	// a degraded write waits for every shard upload attempt, including dead
+	// owners, before it commits.
+	timeout := s.cfg.WriteTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			timeout = remaining
+		}
+	}
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 // alreadyForwarded reports whether this request already made one forwarding hop.
 func alreadyForwarded(ctx context.Context) bool {
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -147,8 +166,8 @@ func (s *Server) forwardPut(ctx context.Context, req *pb.PutRequest) (*pb.PutRes
 			continue
 		}
 
-		fctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
-		fctx = metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true")
+		fctx, cancel := s.forwardContext(ctx)
+		fctx = rpc.AppendRequestID(metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true"))
 		resp, err := pb.NewStorageServiceClient(conn).Put(fctx, req)
 		cancel()
 
@@ -187,8 +206,8 @@ func (s *Server) forwardToLeader(ctx context.Context, call func(context.Context,
 			continue
 		}
 
-		fctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
-		fctx = metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true")
+		fctx, cancel := s.forwardContext(ctx)
+		fctx = rpc.AppendRequestID(metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true"))
 		err = call(fctx, pb.NewStorageServiceClient(conn))
 		cancel()
 
@@ -224,8 +243,8 @@ func (s *Server) forwardGet(ctx context.Context, req *pb.GetRequest) (*pb.GetRes
 			continue
 		}
 
-		fctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
-		fctx = metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true")
+		fctx, cancel := s.forwardContext(ctx)
+		fctx = rpc.AppendRequestID(metadata.AppendToOutgoingContext(fctx, forwardedMetadataKey, "true"))
 		resp, err := pb.NewStorageServiceClient(conn).Get(fctx, req)
 		cancel()
 

@@ -209,6 +209,7 @@ suite, and a CRLF-safe `gofmt` check entirely in `golang:1.22` Docker.
 | Compose-backed integration | `./scripts/test.ps1 -Integration` / `./scripts/test.sh --integration` |
 | Chaos suite | `./scripts/test.ps1 -Chaos` / `./scripts/test.sh --chaos` |
 | Benchmark harness checks | `./scripts/test.ps1 -Bench` / `./scripts/test.sh --bench` |
+| Full suite matrix | `./scripts/test.ps1 -All` / `./scripts/test.sh --all` |
 | Full local check | `./scripts/check.ps1` / `./scripts/check.sh` |
 | Documentation check | `./scripts/check-docs.ps1` / `./scripts/check-docs.sh` |
 
@@ -250,7 +251,9 @@ internal/
   cluster/      failure detector, repair queue and repairer, orphan sweep
   gateway/      ring, retrying client, CLI commands, rendering
   bench/        load, storage, recovery, and report logic
-  rpc/          shared dial options, auth metadata, message limits
+  rpc/          shared dial options, auth metadata, request IDs, message limits
+  logging/      structured JSON/text logger construction
+  version/      release version, stamped by the Docker build
 proto/          storage.proto and committed generated code
 scripts/        PowerShell and bash wrappers for every workflow
 tests/          support, unit, integration, chaos, and bench suites
@@ -280,6 +283,8 @@ All node and CLI settings are environment variables. The common ones:
 | `GATEWAY_NODES` | required | `id=host:port,...` for the CLI; no localhost fallback |
 | `AUTH_TOKEN` | empty | Shared bearer token; empty disables auth with a warning |
 | `TLS_ENABLED` | `false` | Optional TLS on the gRPC server and forwarding clients |
+| `LOG_FORMAT` | `text` | `json` in containers, `text` locally |
+| `SHUTDOWN_TIMEOUT` | `30s` | gRPC drain limit before a forced stop |
 
 Detector, repair, fragment, and read-path tuning variables are documented with
 their defaults in [docs/OPERATIONS.md](docs/OPERATIONS.md) and
@@ -289,6 +294,7 @@ their defaults in [docs/OPERATIONS.md](docs/OPERATIONS.md) and
 
 | Document | Contents |
 | --- | --- |
+| [CHANGELOG.md](CHANGELOG.md) | Release notes, migration note, known limitations |
 | [docs/USAGE.md](docs/USAGE.md) | Full CLI reference, flags, env vars, exit codes, JSON output, auth |
 | [docs/DEMO.md](docs/DEMO.md) | Scripted demo, expected output, timings, speaker checklist |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Start/stop/reset, ports, volumes, logs, degraded mode, repair, backup, troubleshooting |
@@ -300,6 +306,18 @@ their defaults in [docs/OPERATIONS.md](docs/OPERATIONS.md) and
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Benchmark methodology, commands, output schema, expected ratios |
 | [docs/REQUIREMENTS_MAPPING.md](docs/REQUIREMENTS_MAPPING.md) | Course principles and proposal components mapped to code and commands |
 | [tests/README.md](tests/README.md) | Test layout, shared harness, white-box exceptions |
+
+## Release
+
+The current release is **v1.0.0**. The Docker build stamps the version into
+every binary; `docker compose run --rm gateway version` prints it, and the
+server logs it at startup. Release notes, the migration note for the
+transitional `store` table, and known limitations are in
+[CHANGELOG.md](CHANGELOG.md).
+
+Raft snapshots are metadata-only at `schema_version: 3`. A version 1 or 2
+snapshot that still contains full-value legacy rows fails restore with an
+export instruction; export and rewrite those keys before upgrading.
 
 ## Current limitations and future work
 

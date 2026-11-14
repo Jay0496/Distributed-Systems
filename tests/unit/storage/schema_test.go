@@ -19,7 +19,7 @@ func TestSchemaCreatesTablesAndIndexes(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	wantTables := []string{
-		"store",
+		"schema_migrations",
 		"stripes",
 		"keys",
 		"placements",
@@ -82,11 +82,21 @@ func TestSchemaMigrationIsIdempotent(t *testing.T) {
 
 	var tables int
 	if err := second.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('store','stripes','keys','placements','fragments','cluster_config','raft_state')`,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('schema_migrations','stripes','keys','placements','fragments','cluster_config','raft_state')`,
 	).Scan(&tables); err != nil {
 		t.Fatalf("count tables: %v", err)
 	}
 	if tables != 7 {
 		t.Fatalf("tables = %d, want 7", tables)
+	}
+
+	var legacy int
+	if err := second.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'store'`,
+	).Scan(&legacy); err != nil {
+		t.Fatalf("count legacy table: %v", err)
+	}
+	if legacy != 0 {
+		t.Fatalf("legacy store table still exists")
 	}
 }

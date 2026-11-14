@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -283,6 +284,16 @@ func TestReadFailsWithThreeShardsDown(t *testing.T) {
 func TestReadNotFound(t *testing.T) {
 	c := support.StartCluster(t, 5)
 	follower := c.NonLeaderIDs(t)[0]
+
+	// A newly created follower may not have observed the leader yet. Wait for
+	// it to report a leader so this test exercises forwarding, not an election
+	// race.
+	c.WaitFor(t, 10*time.Second, "follower to learn the leader", func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		status, err := c.Node(t, follower).Client.NodeStatus(ctx, &pb.NodeStatusRequest{})
+		return err == nil && status.GetLeaderId() != ""
+	})
 
 	_, err := c.GetVia(t, follower, "missing-key")
 	if status.Code(err) != codes.NotFound {

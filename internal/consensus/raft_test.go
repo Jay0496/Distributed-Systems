@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"distributed-kv-store/internal/redundancy"
+	"distributed-kv-store/internal/storage"
+
 	"github.com/hashicorp/raft"
 )
 
@@ -121,38 +124,39 @@ func applyCommand(t *testing.T, node *Node, cmd Command) interface{} {
 	return future.Response()
 }
 
-type getter interface {
-	Get(key string) ([]byte, error)
+type metadataGetter interface {
+	GetKey(key string) (storage.KeyMeta, error)
 }
 
-func waitForValue(t *testing.T, store getter, key, want string, timeout time.Duration) {
+func waitForStripe(t *testing.T, store metadataGetter, key, stripeID string, timeout time.Duration) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		value, err := store.Get(key)
-		if err == nil && string(value) == want {
+		meta, err := store.GetKey(key)
+		if err == nil && meta.StripeID == stripeID {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %q=%q", key, want)
+	t.Fatalf("timed out waiting for %q=%q", key, stripeID)
 }
 
 // TestRaftClusterReplication spins up a 3-node in-memory Raft cluster, waits
-// for a leader election, applies a Put command, and verifies that the data is
-// replicated to every node's in-memory store.
+// for a leader election, applies a metadata command, and verifies that the
+// metadata is replicated to every node's in-memory store.
 func TestRaftClusterReplication(t *testing.T) {
 	c := newTestCluster(t, 3)
 	leaderIdx := c.waitLeader(t, -1)
 	t.Logf("leader elected: %s", c.ids[leaderIdx])
 
-	applyCommand(t, c.nodes[leaderIdx], Command{Op: OpPut, Legacy: &LegacyOp{Key: "foo", Value: []byte("bar")}})
+	meta := commandTestMeta("foo", "stripe-foo", string(redundancy.ModeRS32), 1, []byte("bar"))
+	applyCommand(t, c.nodes[leaderIdx], Command{Op: OpPutMeta, Meta: &meta})
 
 	for i := 0; i < len(c.stores); i++ {
-		waitForValue(t, c.stores[i], "foo", "bar", 5*time.Second)
+		waitForStripe(t, c.stores[i], "foo", "stripe-foo", 5*time.Second)
 	}
-	t.Log("data successfully replicated to all 3 nodes")
+	t.Log("metadata successfully replicated to all 3 nodes")
 }
 
 // TestRaftLeaderFailover kills the leader and verifies that the remaining
@@ -171,13 +175,14 @@ func TestRaftLeaderFailover(t *testing.T) {
 	newLeader := c.waitLeader(t, oldLeader)
 	t.Logf("new leader after failover: %s", c.ids[newLeader])
 
-	applyCommand(t, c.nodes[newLeader], Command{Op: OpPut, Legacy: &LegacyOp{Key: "after-failover", Value: []byte("ok")}})
+	meta := commandTestMeta("after-failover", "stripe-after-failover", string(redundancy.ModeRS32), 1, []byte("ok"))
+	applyCommand(t, c.nodes[newLeader], Command{Op: OpPutMeta, Meta: &meta})
 
 	for i, node := range c.nodes {
 		if node == nil {
 			continue
 		}
-		waitForValue(t, c.stores[i], "after-failover", "ok", 5*time.Second)
+		waitForStripe(t, c.stores[i], "after-failover", "stripe-after-failover", 5*time.Second)
 	}
 	t.Log("writes still commit with 2/3 nodes alive")
 }
@@ -188,9 +193,10 @@ func TestRaftPersistenceCatchUp(t *testing.T) {
 	c := newTestCluster(t, 3)
 	leaderIdx := c.waitLeader(t, -1)
 
-	applyCommand(t, c.nodes[leaderIdx], Command{Op: OpPut, Legacy: &LegacyOp{Key: "before", Value: []byte("1")}})
+	before := commandTestMeta("before", "stripe-before", string(redundancy.ModeRS32), 1, []byte("1"))
+	applyCommand(t, c.nodes[leaderIdx], Command{Op: OpPutMeta, Meta: &before})
 	for i := range c.stores {
-		waitForValue(t, c.stores[i], "before", "1", 5*time.Second)
+		waitForStripe(t, c.stores[i], "before", "stripe-before", 5*time.Second)
 	}
 
 	// Stop a follower. Closing the node releases the BoltDB file lock so the
@@ -202,8 +208,9 @@ func TestRaftPersistenceCatchUp(t *testing.T) {
 	c.transports[stopped] = nil
 
 	// Commit more data while it is down.
-	applyCommand(t, c.nodes[leaderIdx], Command{Op: OpPut, Legacy: &LegacyOp{Key: "after", Value: []byte("2")}})
-	waitForValue(t, c.stores[leaderIdx], "after", "2", 5*time.Second)
+	after := commandTestMeta("after", "stripe-after", string(redundancy.ModeRS32), 1, []byte("2"))
+	applyCommand(t, c.nodes[leaderIdx], Command{Op: OpPutMeta, Meta: &after})
+	waitForStripe(t, c.stores[leaderIdx], "after", "stripe-after", 5*time.Second)
 
 	// Restart the follower with the same data directory and a fresh store.
 	_, trans := raft.NewInmemTransport(c.addrs[stopped])
@@ -224,8 +231,8 @@ func TestRaftPersistenceCatchUp(t *testing.T) {
 	c.nodes[stopped] = node
 
 	// The restarted node must replay its log and catch up.
-	waitForValue(t, c.stores[stopped], "after", "2", 10*time.Second)
-	waitForValue(t, c.stores[stopped], "before", "1", 10*time.Second)
+	waitForStripe(t, c.stores[stopped], "after", "stripe-after", 10*time.Second)
+	waitForStripe(t, c.stores[stopped], "before", "stripe-before", 10*time.Second)
 	t.Log("restarted follower caught up via persistent log")
 }
 
@@ -252,7 +259,8 @@ func TestRaftSnapshotRestore(t *testing.T) {
 
 	for i := 0; i < 20; i++ {
 		key := fmt.Sprintf("key-%02d", i)
-		applyCommand(t, node, Command{Op: OpPut, Legacy: &LegacyOp{Key: key, Value: []byte(key)}})
+		meta := commandTestMeta(key, fmt.Sprintf("stripe-snapshot-%02d", i), string(redundancy.ModeRS32), 1, []byte(key))
+		applyCommand(t, node, Command{Op: OpPutMeta, Meta: &meta})
 	}
 
 	if err := node.Raft.Snapshot().Error(); err != nil {
@@ -271,7 +279,7 @@ func TestRaftSnapshotRestore(t *testing.T) {
 	defer restarted.Close()
 	defer restartedTransport.Close()
 
-	waitForValue(t, restartedStore, "key-00", "key-00", 10*time.Second)
-	waitForValue(t, restartedStore, "key-19", "key-19", 10*time.Second)
-	t.Log("state restored from snapshot after restart")
+	waitForStripe(t, restartedStore, "key-00", "stripe-snapshot-00", 10*time.Second)
+	waitForStripe(t, restartedStore, "key-19", "stripe-snapshot-19", 10*time.Second)
+	t.Log("metadata restored from snapshot after restart")
 }

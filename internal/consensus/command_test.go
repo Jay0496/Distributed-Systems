@@ -141,7 +141,6 @@ func TestCommandValidation(t *testing.T) {
 			meta.Placement[3].IsParity = false
 			return &meta
 		}()}},
-		{name: "metadata with legacy payload", cmd: Command{Op: OpPutMeta, Meta: &valid, Legacy: &LegacyOp{Key: "alpha", Value: value}}},
 		{name: "set_meta_status missing key", cmd: Command{Op: OpSetMetaStatus, StripeID: "stripe-1", Version: 1}},
 		{name: "set_meta_status missing stripe", cmd: Command{Op: OpSetMetaStatus, Key: "alpha", Version: 1}},
 		{name: "set_meta_status zero version", cmd: Command{Op: OpSetMetaStatus, Key: "alpha", StripeID: "stripe-1"}},
@@ -231,30 +230,19 @@ func TestMetadataCommandHasNoPayload(t *testing.T) {
 	}
 }
 
-func TestLegacyCommandsMayCarryLargeValues(t *testing.T) {
-	cmd := Command{Op: OpPut, Legacy: &LegacyOp{Key: "large", Value: bytes.Repeat([]byte("v"), 1<<20)}}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if len(data) <= metadataMaxBytes {
-		t.Fatalf("legacy command is unexpectedly small: %d bytes", len(data))
-	}
-	if err := validateMetadataSize(cmd, data); err != nil {
-		t.Fatalf("legacy command was size-guarded: %v", err)
-	}
-}
-
-func TestCommandHasNoTopLevelValueField(t *testing.T) {
+func TestCommandHasNoPayloadField(t *testing.T) {
 	commandType := reflect.TypeOf(Command{})
-	if _, ok := commandType.FieldByName("Value"); ok {
-		t.Fatal("Command must not expose a top-level Value field")
+	for _, field := range []string{"Value", "Legacy"} {
+		if _, ok := commandType.FieldByName(field); ok {
+			t.Fatalf("Command must not expose a %s field", field)
+		}
 	}
-	if _, ok := commandType.FieldByName("Legacy"); !ok {
-		t.Fatal("Command must expose the transitional Legacy field")
-	}
-	legacyType := reflect.TypeOf(LegacyOp{})
-	if _, ok := legacyType.FieldByName("Value"); !ok {
-		t.Fatal("LegacyOp must carry the transitional payload")
+
+	// Every command the FSM accepts is metadata-only and therefore covered by
+	// the size guard.
+	for _, op := range []string{OpPutMeta, OpSetMetaStatus, OpGetMeta, OpDeleteMeta, OpSetConfig, OpGetConfig} {
+		if !IsMetadata(op) {
+			t.Fatalf("%q is not classified as a metadata operation", op)
+		}
 	}
 }
